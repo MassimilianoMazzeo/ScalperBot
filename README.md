@@ -1,52 +1,54 @@
 # ScalperBot
 
-Expert Advisor MQL5 per MetaTrader 5, pensato per **XAUUSD**.
+Expert Advisor MQL5 per MetaTrader 5, pensato per **XAUUSD** su conto hedging (funziona anche su altri simboli, es. BTCUSD: tutte le distanze sono in ATR, vanno solo rivisti `InpMaxSpread` e `InpMaxLossMoney`).
 
-Due ingressi (mai contemporanei, massimo uno per candela):
+## v7.00 — multi-strategia, multi-timeframe
 
-- **Range**: se le ultime `InpRangeCandles` candele stanno in un box di al più `InpRangeMaxPoints` punti, vende sul bordo alto / compra sul bordo basso con TP al lato opposto.
-- **Momentum**: se il corpo della candela corrente supera `InpMinCandlePoints` punti, entra nella direzione della spinta.
+Quattro strategie indipendenti, ognuna con il **suo timeframe** e il suo magic number (`InpMagicBase + indice`). Al massimo una posizione per strategia e `InpMaxPositions` totali. Si mette su un grafico qualsiasi del simbolo: il timeframe del grafico non conta.
 
-Gestione della posizione a scaglioni monetari (in € reali, netti di commissioni):
+| # | Tag | Idea | TF default | Runner |
+|---|---|---|---|---|
+| 0 | **RNG** | Mean-reversion sui bordi di un box stretto (≤ 1.5 ATR in 20 candele), solo con ADX < 20. TP sul bordo opposto | M1 | no |
+| 1 | **MOM** | Corpo della candela corrente tra 0.6 e 1.8 ATR nella direzione del +DI/−DI, solo con ADX ≥ 22 | M1 | sì |
+| 2 | **BRK** | La candela chiusa rompe un box (12 candele, oppure la sessione asiatica 01–08 server) con corpo ≥ 0.4 ATR | M5 | sì |
+| 3 | **PB** | Trend EMA20 > EMA50 (in salita), la candela tocca la EMA20 e chiude sopra, rialzista. SL sotto il minimo | M15 | sì |
 
-| Profitto raggiunto | Cosa succede |
-|---|---|
-| `InpStep1Trigger` (2,50€) | SL a Break-Even + apre la piramide (seconda posizione, SL sull'apertura della base) |
-| `InpStep2Trigger` (5€) | SL a `+InpStep2Lock` (2,50€) |
-| `InpStep3Trigger` (10€) | SL a `+InpStep3Lock` (5€) |
-| `InpTakeProfit` (15€) | chiude |
-| `-InpMaxLoss` (-20€) | chiude |
+### Rischio in R, non in euro fissi
 
-## v6.00 — review e correzioni
+A **0.25 lotti** sull'oro 1 punto = $0.25 ≈ 0,23€: le vecchie soglie (+2,50€ → BE, +15€ TP, −20€ SL) valevano 11 / 65 / 87 punti, cioè dentro lo spread (15–30 punti). Per questo:
 
-La v5 aveva bug che lasciavano la posizione più scoperta di quanto sembrasse:
+- **R** = distanza dello SL = `ATR(14) × moltiplicatore` sul timeframe della strategia (`InpSlMode = SL_ATR`), oppure fisso in euro (`SL_MONEY`).
+- **Tetto** `InpMaxLossMoney` (60€): se il rischio ATR supera il tetto, la strategia salta l'ingresso e lo scrive nel journal.
+- Gestione per ogni posizione:
+  - a **+0.5R** SL a Break-Even + `InpBeBufferPoints`
+  - a **+1R** chiude lo **scalp** (`InpScalpPct` = 50 %); se la strategia non ha runner chiude tutto
+  - il resto è il **runner**: SL a +0.5R, poi trailing `estremo dall'ingresso − 1.5 ATR`, TP finale a **+3R**
+  - RNG: nessuno scalp a 1R, il TP è il bordo opposto del box
+- SL e TP sono **al broker** dall'apertura; i controlli software sono solo backup.
 
-1. **Conversione euro → prezzo sbagliata** (`euro / (lotti * 10)`). Su XAUUSD a 0.1 lotti gli step di SL erano 10× più stretti del dichiarato: lo "SL a +5€" stava a $0.05 dall'apertura (= 0,46€), dentro lo spread. Ora si usa `SYMBOL_TRADE_TICK_VALUE` / `TICK_SIZE` reali.
-2. **Cooldown e filtro spread bloccavano anche la gestione**: nei 15 s dopo un'operazione, o con spread alto (news, rollover), l'EA non chiudeva a -20€ né muoveva lo SL. Ora filtrano solo i nuovi ingressi.
-3. **Nessuno SL/TP al broker**: lo stop era solo software. Terminale chiuso o connessione persa = posizione senza protezione. Ora SL e TP monetari vengono messi all'apertura; il controllo software resta come backup.
-4. **Lo SL poteva tornare indietro**: se il profitto ritracciava da +10€ a +3€, lo SL veniva rimesso a Break-Even. Ora gli step sono monotoni.
-5. **Vendite dentro un breakout**: il box esclude la candela corrente, quindi durante una rottura verso l'alto il prezzo era "≥ bordo alto" e l'EA vendeva ogni 15 s contro il breakout. Ora si entra solo se il prezzo è ancora dentro il box (± `InpRangeTolerance`) e la candela corrente non sta già spingendo nella direzione della rottura.
-6. **Commissioni ignorate**: i target erano lordi. Ora il profitto è netto (commissione dei deal della posizione, raddoppiata se `InpCommissionPerSide`).
-7. **Stato perso al riavvio**: con 2 posizioni aperte e EA riavviato, apriva una terza piramide. Ora lo stato si ricava dal conteggio delle posizioni.
-8. **Confronto SL senza normalizzazione** → `PositionModify` ripetuto ogni tick. Ora prezzo normalizzato, tolleranza e rispetto di stops/freeze level del broker.
+### Protezioni
 
-Aggiunte (tutte parametriche):
+- `InpMaxDailyLoss` (150€): perdita del giorno (realizzata + flottante) oltre la quale non si apre più.
+- `InpMaxConsecLosses` (3) → pausa di `InpPauseMinutes` (60).
+- Spread massimo, cooldown tra ingressi, fascia oraria (default: sempre).
+- Piramide **disattivata** di default: a 0.25 lotti raddoppia l'esposizione e la seconda posizione con SL sull'apertura della base perde sempre sul ritraccio.
 
-- `InpMaxDailyLoss`: sotto questa perdita giornaliera (realizzata + flottante) niente nuovi ingressi. Default 50€, 0 = off.
-- `InpStartHour` / `InpEndHour`: fascia oraria server. Default 0–24 = sempre.
-- `InpMaxCandlePoints`: non inseguire candele già troppo estese. Default 0 = off.
-- `InpStrategyMode`: range / momentum / entrambe.
-- `InpSlippage`, filling mode dal simbolo, log degli errori di trade nel journal.
+### Da dove viene (storia delle versioni)
 
-Rinominato `InpRangeMaxPips` → `InpRangeMaxPoints` (era già in punti). I vecchi file `.set` vanno rifatti.
+- **v5** (Mazzeo): range + momentum, soglie fisse in euro, +300€ reali. Bug: conversione euro→prezzo `euro/(lotti*10)` (10× troppo stretta sull'oro), cooldown/spread che bloccavano anche la gestione, nessuno SL al broker, vendite dentro i breakout, SL che tornava indietro.
+- **v6**: stessa strategia con i bug corretti, tutto parametrico.
+- **v7**: questa. Compilata con MetaEditor 5 (build settembre 2026): **0 errori, 0 warning**. **Non ancora backtestata.**
 
-## Da verificare in MetaEditor / Strategy Tester
+## Come testarla (Strategy Tester)
 
-- Compilare: la v6 non è stata compilata (sviluppata senza MT5).
-- Nel journal all'avvio compare `15.00€ = X di prezzo per 0.10 lotti`: X deve avere senso per l'oro (≈ 1.5–1.7 con 0.1 lotti).
-- Backtest v5 vs v6 sullo stesso periodo, stesso simbolo, con spread reale.
-- Controllare che il broker accetti lo SL di Break-Even a +2,50€ (stops level).
+1. Copiare `ScalperBot.mq5` in `MQL5/Experts/`, aprirlo in MetaEditor, **Compile** (F7).
+2. Terminal → View → Strategy Tester (Ctrl+R):
+   - Expert: `ScalperBot`, Symbol: `XAUUSD` (o `GOLD` a seconda del broker), Timeframe: uno qualsiasi (M1 va bene)
+   - Modelling: **Every tick based on real ticks**
+   - Deposit: quello reale, Leverage 1:500
+   - Periodo: almeno 3 mesi
+3. Journal: all'avvio deve comparire `1 punto = 0.2x€. Tetto perdita 60.00€ = 2.6 di prezzo` (valori sensati per l'oro a 0.25 lotti).
+4. Confronto utile: stesso periodo con la v5 (`git show 3c8ba0d:ScalperBot.mq5 > ScalperBot_v5.mq5`).
+5. Per capire quale strategia rende: disattivare le altre tre (`InpXxxEnabled = false`) e ripetere.
 
-## Parametri e XAUUSD
-
-I default (150 punti di box, 50 punti di spinta) sono nati su EURUSD. Sull'oro 150 punti = $1.50 in 15 candele, un box rarissimo: in pratica quasi tutti gli ingressi sono momentum. Da rivedere nel tester.
+Cose da guardare nel report: profit factor per strategia (i commenti dei trade iniziano con il tag), drawdown massimo, quanti `SKIP ... rischio > tetto` nel journal (se tanti, alzare il tetto o abbassare i moltiplicatori ATR).
