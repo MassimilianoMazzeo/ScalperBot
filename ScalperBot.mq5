@@ -3,7 +3,7 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.00"
+#property version   "7.10"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -23,6 +23,11 @@ CTrade trade;
 //| timeframe della strategia (o fissa in euro), con tetto in euro.  |
 //| Gestione: BE a +BeR, chiusura parziale a +Tp1R (scalp), il resto |
 //| corre con trailing ATR fino a +Tp2R (runner).                    |
+//|                                                                  |
+//| v7.10: filtro spread in % di R (funziona su qualsiasi simbolo),  |
+//| lotto ridotto se il rischio supera il tetto, BE che copre le     |
+//| commissioni reali, stato sempre visibile sul grafico e nel       |
+//| journal con il motivo per cui ogni strategia sta aspettando.     |
 //+------------------------------------------------------------------+
 
 #define N_STRATEGIES 4
@@ -37,6 +42,12 @@ enum ENUM_SL_MODE
    SL_MONEY    // SL = InpMaxLossMoney fisso in euro
   };
 
+enum ENUM_LOT_MODE
+  {
+   LOT_FIT_RISK,    // Riduci il lotto finché il rischio rientra nel tetto
+   LOT_FIXED_SKIP   // Lotto fisso: se il rischio supera il tetto salta l'ingresso
+  };
+
 enum ENUM_BOX_MODE
   {
    BOX_CANDLES,   // Box = ultime N candele chiuse
@@ -46,16 +57,19 @@ enum ENUM_BOX_MODE
 // --- PARAMETRI DI INPUT
 input group "--- Generali ---"
 input double   InpLotSize        = 0.25;     // Lotto per posizione
+input ENUM_LOT_MODE InpLotMode   = LOT_FIT_RISK; // Se il rischio supera il tetto: riduci il lotto o salta
 input ulong    InpMagicBase      = 998870;   // Magic number base (ogni strategia usa base+indice)
 input int      InpMaxPositions   = 2;        // Posizioni aperte massime (tutte le strategie)
-input int      InpMaxSpread      = 30;       // Spread massimo per entrare (Punti)
-input int      InpSlippage       = 20;       // Slippage massimo (Punti)
+input double   InpMaxSpreadPctR  = 25.0;     // Spread massimo in % dello Stop Loss (R) della strategia
+input int      InpMaxSpread      = 0;        // Spread massimo assoluto (Punti), 0 = off (vale solo quello in % di R)
+input int      InpSlippage       = 20;       // Slippage minimo (Punti): si usa il maggiore tra questo e il 10% di R
+input int      InpStatusEveryMin = 5;        // Ogni quanti minuti scrivere lo stato nel journal (0 = solo sul grafico)
 
 input group "--- Rischio ---"
 input ENUM_SL_MODE InpSlMode     = SL_ATR;   // Come si calcola lo Stop Loss
 input double   InpMaxLossMoney   = 60.0;     // Perdita massima per posizione (€): tetto o SL fisso
 input double   InpBeR            = 0.5;      // A +X R porta lo SL a Break-Even
-input int      InpBeBufferPoints = 5;        // Punti oltre l'apertura per il Break-Even (copre commissioni)
+input int      InpBeBufferPoints = 5;        // Buffer minimo oltre l'apertura per il Break-Even (le commissioni reali si aggiungono da sole)
 input double   InpTp1R           = 1.0;      // A +X R chiude lo scalp (parziale se runner, totale altrimenti)
 input double   InpScalpPct       = 50.0;     // % di posizione chiusa allo scalp (se runner attivo)
 input double   InpLockR          = 0.5;      // Dopo lo scalp, SL a +X R
@@ -150,6 +164,9 @@ struct PosInfo
 
 datetime lastTradeTime = 0;
 datetime pauseUntil    = 0;
+string   g_why[N_STRATEGIES];    // perché ogni strategia sta aspettando (mostrato sul grafico)
+string   g_globalWhy   = "";     // perché gli ingressi sono bloccati per tutte
+datetime g_lastStatusLog = 0;
 
 //+------------------------------------------------------------------+
 //| Init                                                             |
@@ -203,14 +220,26 @@ int OnInit()
         }
      }
 
-   PrintFormat("ScalperBot v7 su %s, %.2f lotti. 1 punto = %.2f€. Tetto perdita %.2f€ = %s di prezzo.",
-               _Symbol, InpLotSize, PriceToMoney(_Point, InpLotSize), InpMaxLossMoney,
-               DoubleToString(MoneyToPrice(InpMaxLossMoney, InpLotSize), _Digits));
+   for(int i = 0; i < N_STRATEGIES; i++) g_why[i] = "in attesa del primo tick";
+
+   double lots   = NormalizeLot(InpLotSize);
+   long   spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   PrintFormat("ScalperBot v7.1 su %s | digits %d | point %s | contratto %.2f | tick value %.4f | tick size %s | stops level %d pt | spread ora %d pt",
+               _Symbol, _Digits, DoubleToString(_Point, _Digits), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
+               SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), _Digits),
+               (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), (int)spread);
+   PrintFormat("Lotto %.2f: 1 punto = %.4f€, spread ora = %.2f€ | tetto %.0f€ = %s di prezzo | lotto %s",
+               lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), InpMaxLossMoney,
+               DoubleToString(MoneyToPrice(InpMaxLossMoney, lots), _Digits),
+               (InpLotMode == LOT_FIT_RISK) ? "ridotto se il rischio supera il tetto" : "fisso, salta se il rischio supera il tetto");
+   if(InpMaxSpread > 0 && spread > InpMaxSpread)
+      PrintFormat("ATTENZIONE: spread %d pt > InpMaxSpread %d: nessun ingresso finché non scende", (int)spread, InpMaxSpread);
    return(INIT_SUCCEEDED);
   }
 
 void OnDeinit(const int reason)
   {
+   Comment("");
    for(int i = 0; i < N_STRATEGIES; i++)
      {
       if(S[i].hAtr     != INVALID_HANDLE) IndicatorRelease(S[i].hAtr);
@@ -383,9 +412,14 @@ double FloatingNetPnL()
 bool GlobalEntryFiltersOk()
   {
    datetime now = TimeCurrent();
-   if(now - lastTradeTime < InpMinSecBetweenTrades) return(false);
-   if(now < pauseUntil) return(false);
-   if(SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) > InpMaxSpread) return(false);
+   g_globalWhy = "";
+   if(now - lastTradeTime < InpMinSecBetweenTrades)
+     { g_globalWhy = StringFormat("cooldown %d s dopo l'ultimo ingresso", InpMinSecBetweenTrades); return(false); }
+   if(now < pauseUntil)
+     { g_globalWhy = "pausa dopo perdite consecutive fino alle " + TimeToString(pauseUntil, TIME_MINUTES); return(false); }
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(InpMaxSpread > 0 && spread > InpMaxSpread)
+     { g_globalWhy = StringFormat("spread %d pt > InpMaxSpread %d", (int)spread, InpMaxSpread); return(false); }
 
    if(!(InpStartHour == 0 && InpEndHour == 24))
      {
@@ -394,7 +428,7 @@ bool GlobalEntryFiltersOk()
       bool inside = (InpStartHour < InpEndHour)
                     ? (t.hour >= InpStartHour && t.hour < InpEndHour)
                     : (t.hour >= InpStartHour || t.hour < InpEndHour);
-      if(!inside) return(false);
+      if(!inside) { g_globalWhy = StringFormat("fuori fascia oraria %02d-%02d (ora server %02d)", InpStartHour, InpEndHour, t.hour); return(false); }
      }
 
    if(InpMaxDailyLoss > 0.0 || InpMaxConsecLosses > 0)
@@ -412,6 +446,7 @@ bool GlobalEntryFiltersOk()
                pauseUntil = until;
                PrintFormat("PAUSA: %d perdite consecutive, niente ingressi fino alle %s", consec, TimeToString(until, TIME_MINUTES));
               }
+            g_globalWhy = "pausa dopo perdite consecutive fino alle " + TimeToString(until, TIME_MINUTES);
             return(false);
            }
         }
@@ -426,6 +461,7 @@ bool GlobalEntryFiltersOk()
                PrintFormat("LIMITE GIORNALIERO: %.2f€ (limite -%.2f€). Nessun nuovo ingresso oggi.", dailyPnL, InpMaxDailyLoss);
                lastWarn = now;
               }
+            g_globalWhy = StringFormat("limite giornaliero: oggi %.2f€ (limite -%.0f€)", dailyPnL, InpMaxDailyLoss);
             return(false);
            }
         }
@@ -457,14 +493,42 @@ bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, dou
 
    if(InpSlMode == SL_MONEY) slDist = MoneyToPrice(InpMaxLossMoney, lots);
    slDist = MathMax(slDist, minDist);
-   if(slDist <= 0.0) return(false);
+   if(slDist <= 0.0) { g_why[idx] = "SL non calcolabile"; return(false); }
 
-   double riskMoney = PriceToMoney(slDist, lots);
-   if(riskMoney > InpMaxLossMoney + 0.01)
+   // Spread in rapporto allo stop: oltre la soglia lo scalp non ha senso
+   double spreadPrice = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+   double spreadPct   = 100.0 * spreadPrice / slDist;
+   if(spreadPct > InpMaxSpreadPctR)
      {
-      PrintFormat("SKIP %s: rischio %.2f€ > tetto %.2f€ (SL %s)", S[idx].tag, riskMoney, InpMaxLossMoney, DoubleToString(slDist, _Digits));
+      g_why[idx] = StringFormat("spread %.0f%% di R > %.0f%%", spreadPct, InpMaxSpreadPctR);
       return(false);
      }
+
+   // Tetto di perdita: riduci il lotto oppure salta
+   double riskPerLot = PriceToMoney(slDist, 1.0);
+   double riskMoney  = riskPerLot * lots;
+   if(riskMoney > InpMaxLossMoney + 0.01)
+     {
+      if(InpLotMode == LOT_FIT_RISK && riskPerLot > 0.0)
+        {
+         double fitted = NormalizeLot(InpMaxLossMoney / riskPerLot);
+         if(riskPerLot * fitted > InpMaxLossMoney + 0.01)
+           {
+            g_why[idx] = StringFormat("rischio %.0f€ al lotto minimo > tetto %.0f€", riskPerLot * fitted, InpMaxLossMoney);
+            return(false);
+           }
+         PrintFormat("%s: lotto %.2f -> %.2f per restare nel tetto di %.0f€ (R=%s)", S[idx].tag, lots, fitted, InpMaxLossMoney, DoubleToString(slDist, _Digits));
+         lots = fitted;
+         riskMoney = riskPerLot * lots;
+        }
+      else
+        {
+         g_why[idx] = StringFormat("rischio %.0f€ > tetto %.0f€ (lotto fisso)", riskMoney, InpMaxLossMoney);
+         PrintFormat("SKIP %s: rischio %.2f€ > tetto %.2f€ (SL %s)", S[idx].tag, riskMoney, InpMaxLossMoney, DoubleToString(slDist, _Digits));
+         return(false);
+        }
+     }
+   trade.SetDeviationInPoints((int)MathMax(InpSlippage, MathRound(0.1 * slDist / _Point)));
 
    double tpMult = (S[idx].runner) ? InpTp2R : InpTp1R;
    double tpDist = MathMax(slDist * tpMult, minDist);
@@ -493,8 +557,11 @@ bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, dou
      {
       lastTradeTime = TimeCurrent();
       S[idx].lastEntryBar = iTime(_Symbol, S[idx].tf, 0);
-      PrintFormat("  %s rischio %.2f€ (R=%s), TP %s", S[idx].tag, riskMoney, DoubleToString(slDist, _Digits), DoubleToString(tp, _Digits));
+      g_why[idx] = "in posizione";
+      PrintFormat("  %s %.2f lotti, rischio %.2f€ (R=%s), spread %.0f%% di R, TP %s", S[idx].tag, lots, riskMoney, DoubleToString(slDist, _Digits), spreadPct, DoubleToString(tp, _Digits));
      }
+   else
+      g_why[idx] = "ordine rifiutato: " + trade.ResultRetcodeDescription();
    return(ok);
   }
 
@@ -608,7 +675,8 @@ void ManagePosition(ulong ticket, int &perStrategy[], int total)
    double dir = isBuy ? 1.0 : -1.0;
    if(r >= InpBeR)
      {
-      newSL = openPrice + dir * InpBeBufferPoints * _Point;
+      double beBuffer = MathMax(InpBeBufferPoints * _Point, MoneyToPrice(-info.commission, volume));
+      newSL = openPrice + dir * beBuffer;
       why = "BE";
      }
    if(partialDone)
@@ -691,13 +759,14 @@ bool TryRNG(double lots)
    ENUM_TIMEFRAMES tf = S[idx].tf;
    double atr = Ind(S[idx].hAtr, 0, 1);
    double adx = Ind(S[idx].hAdx, 0, 1);
-   if(atr == EMPTY_VALUE || adx == EMPTY_VALUE || atr <= 0.0) return(false);
-   if(adx >= InpAdxRangeMax) return(false);
+   if(atr == EMPTY_VALUE || adx == EMPTY_VALUE || atr <= 0.0) { g_why[idx] = "indicatori non pronti"; return(false); }
+   if(adx >= InpAdxRangeMax) { g_why[idx] = StringFormat("ADX %.0f >= %.0f: mercato non laterale", adx, InpAdxRangeMax); return(false); }
 
    double hi, lo;
-   if(!BoxOfCandles(tf, InpRngCandles, 1, hi, lo)) return(false);
+   if(!BoxOfCandles(tf, InpRngCandles, 1, hi, lo)) { g_why[idx] = "box non calcolabile"; return(false); }
    double width = hi - lo;
-   if(width > InpRngMaxAtr * atr || width < InpRngMinAtr * atr) return(false);
+   if(width > InpRngMaxAtr * atr) { g_why[idx] = StringFormat("box %.1f ATR > %.1f: troppo largo", width / atr, InpRngMaxAtr); return(false); }
+   if(width < InpRngMinAtr * atr) { g_why[idx] = StringFormat("box %.1f ATR < %.1f: troppo stretto", width / atr, InpRngMinAtr); return(false); }
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -707,18 +776,23 @@ bool TryRNG(double lots)
    double slDist = S[idx].slAtr * atr;
 
    // SELL sul bordo alto: prezzo dentro il box, candela corrente non in rottura
-   if(bid >= hi - tol && bid <= hi + tol && body0 < push)
+   if(bid >= hi - tol && bid <= hi + tol)
      {
+      if(body0 >= push) { g_why[idx] = "sul bordo alto ma la candela sta rompendo"; return(false); }
       double tp = lo + tol;
-      if((bid - tp) / slDist >= InpRngMinRR)
-         return(OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, tp, "RNG sell"));
+      double rr = (bid - tp) / slDist;
+      if(rr < InpRngMinRR) { g_why[idx] = StringFormat("bordo alto, RR %.2f < %.2f", rr, InpRngMinRR); return(false); }
+      return(OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, tp, "RNG sell"));
      }
-   if(ask <= lo + tol && ask >= lo - tol && body0 > -push)
+   if(ask <= lo + tol && ask >= lo - tol)
      {
+      if(body0 <= -push) { g_why[idx] = "sul bordo basso ma la candela sta rompendo"; return(false); }
       double tp = hi - tol;
-      if((tp - ask) / slDist >= InpRngMinRR)
-         return(OpenPosition(idx, ORDER_TYPE_BUY, lots, slDist, tp, "RNG buy"));
+      double rr = (tp - ask) / slDist;
+      if(rr < InpRngMinRR) { g_why[idx] = StringFormat("bordo basso, RR %.2f < %.2f", rr, InpRngMinRR); return(false); }
+      return(OpenPosition(idx, ORDER_TYPE_BUY, lots, slDist, tp, "RNG buy"));
      }
+   g_why[idx] = StringFormat("box ok (%.1f ATR), prezzo lontano dai bordi", width / atr);
    return(false);
   }
 
@@ -733,18 +807,21 @@ bool TryMOM(double lots)
    double adx = Ind(S[idx].hAdx, 0, 1);
    double plusDI  = Ind(S[idx].hAdx, 1, 1);
    double minusDI = Ind(S[idx].hAdx, 2, 1);
-   if(atr == EMPTY_VALUE || adx == EMPTY_VALUE || atr <= 0.0) return(false);
-   if(adx < InpAdxTrendMin) return(false);
+   if(atr == EMPTY_VALUE || adx == EMPTY_VALUE || atr <= 0.0) { g_why[idx] = "indicatori non pronti"; return(false); }
+   if(adx < InpAdxTrendMin) { g_why[idx] = StringFormat("ADX %.0f < %.0f: mercato non direzionale", adx, InpAdxTrendMin); return(false); }
 
    double body = iClose(_Symbol, tf, 0) - iOpen(_Symbol, tf, 0);
    double minB = InpMomMinBodyAtr * atr, maxB = InpMomMaxBodyAtr * atr;
    double slDist = S[idx].slAtr * atr;
+   double bodyAtr = body / atr;
 
-   if(body >= minB && body <= maxB && plusDI > minusDI)
-      return(OpenPosition(idx, ORDER_TYPE_BUY, lots, slDist, 0.0, "MOM buy"));
-   if(body <= -minB && body >= -maxB && minusDI > plusDI)
-      return(OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, 0.0, "MOM sell"));
-   return(false);
+   if(MathAbs(body) < minB) { g_why[idx] = StringFormat("ADX %.0f ok, corpo %.2f ATR (serve >= %.1f)", adx, bodyAtr, InpMomMinBodyAtr); return(false); }
+   if(MathAbs(body) > maxB) { g_why[idx] = StringFormat("corpo %.2f ATR > %.1f: non inseguo", bodyAtr, InpMomMaxBodyAtr); return(false); }
+   if(body > 0.0 && plusDI <= minusDI) { g_why[idx] = "candela verde ma -DI > +DI: contro trend"; return(false); }
+   if(body < 0.0 && minusDI <= plusDI) { g_why[idx] = "candela rossa ma +DI > -DI: contro trend"; return(false); }
+
+   if(body > 0.0) return(OpenPosition(idx, ORDER_TYPE_BUY,  lots, slDist, 0.0, "MOM buy"));
+   return(OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, 0.0, "MOM sell"));
   }
 
 //+------------------------------------------------------------------+
@@ -756,24 +833,24 @@ bool TryBRK(double lots)
    ENUM_TIMEFRAMES tf = S[idx].tf;
    datetime bar0 = iTime(_Symbol, tf, 0);
    if(bar0 == S[idx].lastSignalBar) return(false);   // valutato una volta per candela chiusa
-   S[idx].lastSignalBar = bar0;
 
    double atr = Ind(S[idx].hAtr, 0, 1);
-   if(atr == EMPTY_VALUE || atr <= 0.0) return(false);
+   if(atr == EMPTY_VALUE || atr <= 0.0) { g_why[idx] = "indicatori non pronti"; return(false); }   // senza segnare la candela: si riprova al tick dopo
+   S[idx].lastSignalBar = bar0;
 
    double hi, lo;
    if(InpBrkBoxMode == BOX_CANDLES)
      {
-      if(!BoxOfCandles(tf, InpBrkCandles, 2, hi, lo)) return(false);
+      if(!BoxOfCandles(tf, InpBrkCandles, 2, hi, lo)) { g_why[idx] = "box non calcolabile"; return(false); }
      }
    else
      {
       MqlDateTime t; TimeToStruct(TimeCurrent(), t);
-      if(t.hour >= InpBrkSessionUntil) return(false);
-      if(S[idx].sessionTradeDay == t.day_of_year) return(false);   // un breakout di sessione al giorno
-      if(!BoxOfSession(tf, hi, lo)) return(false);
+      if(t.hour >= InpBrkSessionUntil) { g_why[idx] = StringFormat("sessione: breakout valido solo fino alle %02d", InpBrkSessionUntil); return(false); }
+      if(S[idx].sessionTradeDay == t.day_of_year) { g_why[idx] = "sessione: breakout già fatto oggi"; return(false); }
+      if(!BoxOfSession(tf, hi, lo)) { g_why[idx] = StringFormat("sessione %02d-%02d non ancora chiusa", InpBrkSessionStart, InpBrkSessionEnd); return(false); }
      }
-   if(hi - lo > InpBrkBoxMaxAtr * atr) return(false);
+   if(hi - lo > InpBrkBoxMaxAtr * atr) { g_why[idx] = StringFormat("box %.1f ATR > %.1f: troppo largo", (hi - lo) / atr, InpBrkBoxMaxAtr); return(false); }
 
    double open1 = iOpen(_Symbol, tf, 1), close1 = iClose(_Symbol, tf, 1);
    double body1 = close1 - open1;
@@ -781,10 +858,21 @@ bool TryBRK(double lots)
    double slDist = S[idx].slAtr * atr;
    bool ok = false;
 
-   if(close1 > hi + buffer && body1 >= InpBrkMinBodyAtr * atr)
+   if(close1 > hi + buffer)
+     {
+      if(body1 < InpBrkMinBodyAtr * atr) { g_why[idx] = StringFormat("rottura sopra ma corpo %.2f ATR < %.1f", body1 / atr, InpBrkMinBodyAtr); return(false); }
       ok = OpenPosition(idx, ORDER_TYPE_BUY, lots, slDist, 0.0, "BRK buy");
-   else if(close1 < lo - buffer && -body1 >= InpBrkMinBodyAtr * atr)
+     }
+   else if(close1 < lo - buffer)
+     {
+      if(-body1 < InpBrkMinBodyAtr * atr) { g_why[idx] = StringFormat("rottura sotto ma corpo %.2f ATR < %.1f", -body1 / atr, InpBrkMinBodyAtr); return(false); }
       ok = OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, 0.0, "BRK sell");
+     }
+   else
+     {
+      g_why[idx] = StringFormat("box ok (%.1f ATR), ultima candela chiusa dentro", (hi - lo) / atr);
+      return(false);
+     }
 
    if(ok && InpBrkBoxMode == BOX_SESSION)
      {
@@ -803,15 +891,16 @@ bool TryPB(double lots)
    ENUM_TIMEFRAMES tf = S[idx].tf;
    datetime bar0 = iTime(_Symbol, tf, 0);
    if(bar0 == S[idx].lastSignalBar) return(false);
-   S[idx].lastSignalBar = bar0;
 
    double atr  = Ind(S[idx].hAtr, 0, 1);
    double adx  = Ind(S[idx].hAdx, 0, 1);
    double emaF = Ind(S[idx].hEmaFast, 0, 1);
    double emaS1 = Ind(S[idx].hEmaSlow, 0, 1);
    double emaS3 = Ind(S[idx].hEmaSlow, 0, 3);
-   if(atr == EMPTY_VALUE || adx == EMPTY_VALUE || emaF == EMPTY_VALUE || emaS1 == EMPTY_VALUE || emaS3 == EMPTY_VALUE) return(false);
-   if(atr <= 0.0 || adx < InpAdxTrendMin) return(false);
+   if(atr == EMPTY_VALUE || adx == EMPTY_VALUE || emaF == EMPTY_VALUE || emaS1 == EMPTY_VALUE || emaS3 == EMPTY_VALUE || atr <= 0.0)
+     { g_why[idx] = "indicatori non pronti"; return(false); }
+   S[idx].lastSignalBar = bar0;
+   if(adx < InpAdxTrendMin) { g_why[idx] = StringFormat("ADX %.0f < %.0f: mercato non direzionale", adx, InpAdxTrendMin); return(false); }
 
    double open1 = iOpen(_Symbol, tf, 1), close1 = iClose(_Symbol, tf, 1);
    double high1 = iHigh(_Symbol, tf, 1), low1 = iLow(_Symbol, tf, 1);
@@ -819,18 +908,69 @@ bool TryPB(double lots)
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // Long: trend su, la candela tocca la EMA veloce e chiude sopra, rialzista
-   if(emaF > emaS1 && emaS1 > emaS3 && low1 <= emaF + touch && close1 > emaF && close1 > open1)
+   bool upTrend   = (emaF > emaS1 && emaS1 > emaS3);
+   bool downTrend = (emaF < emaS1 && emaS1 < emaS3);
+   if(!upTrend && !downTrend) { g_why[idx] = StringFormat("ADX %.0f ok, EMA%d/%d non allineate", adx, InpPbEmaFast, InpPbEmaSlow); return(false); }
+
+   if(upTrend)
      {
+      if(low1 > emaF + touch) { g_why[idx] = "trend su, nessun pullback sulla EMA"; return(false); }
+      if(!(close1 > emaF && close1 > open1)) { g_why[idx] = "trend su, pullback ma candela non conferma"; return(false); }
       double slDist = MathMax(S[idx].slAtr * atr, ask - (low1 - 0.2 * atr));
       return(OpenPosition(idx, ORDER_TYPE_BUY, lots, slDist, 0.0, "PB buy"));
      }
-   if(emaF < emaS1 && emaS1 < emaS3 && high1 >= emaF - touch && close1 < emaF && close1 < open1)
+   if(high1 < emaF - touch) { g_why[idx] = "trend giù, nessun pullback sulla EMA"; return(false); }
+   if(!(close1 < emaF && close1 < open1)) { g_why[idx] = "trend giù, pullback ma candela non conferma"; return(false); }
+   double slDist = MathMax(S[idx].slAtr * atr, (high1 + 0.2 * atr) - bid);
+   return(OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, 0.0, "PB sell"));
+  }
+
+//+------------------------------------------------------------------+
+//| Stato: sul grafico a ogni tick, nel journal ogni N minuti        |
+//+------------------------------------------------------------------+
+string TfName(ENUM_TIMEFRAMES tf)
+  {
+   return(StringSubstr(EnumToString(tf), 7));   // PERIOD_M5 -> M5
+  }
+
+void ReportStatus(int total, int &perStrategy[])
+  {
+   datetime now = TimeCurrent();
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   double lots = NormalizeLot(InpLotSize);
+   string lines[N_STRATEGIES + 2];
+
+   lines[0] = StringFormat("ScalperBot v7.1 | %s | spread %d pt = %.2f€ a %.2f lotti | posizioni %d/%d | %s",
+                           _Symbol, (int)spread, PriceToMoney(spread * _Point, lots), lots, total, InpMaxPositions,
+                           TimeToString(now, TIME_DATE | TIME_MINUTES));
+   lines[1] = (g_globalWhy == "") ? "ingressi: aperti" : "INGRESSI BLOCCATI: " + g_globalWhy;
+
+   for(int i = 0; i < N_STRATEGIES; i++)
      {
-      double slDist = MathMax(S[idx].slAtr * atr, (high1 + 0.2 * atr) - bid);
-      return(OpenPosition(idx, ORDER_TYPE_SELL, lots, slDist, 0.0, "PB sell"));
+      string tag = S[i].tag + " " + TfName(S[i].tf);
+      if(!S[i].enabled) { lines[i + 2] = tag + " | off"; continue; }
+      double atr = Ind(S[i].hAtr, 0, 1);
+      if(atr == EMPTY_VALUE || atr <= 0.0) { lines[i + 2] = tag + " | ATR non pronto"; continue; }
+      double R   = atr * S[i].slAtr;
+      double eur = PriceToMoney(R, lots);
+      string cap = "";
+      if(eur > InpMaxLossMoney) cap = (InpLotMode == LOT_FIT_RISK) ? StringFormat(" -> lotto %.2f", NormalizeLot(InpMaxLossMoney / PriceToMoney(R, 1.0))) : " > TETTO";
+      string state = (perStrategy[i] > 0) ? "IN POSIZIONE" : g_why[i];
+      lines[i + 2] = StringFormat("%s | ATR %s | R %s = %.0f€%s | spread %.0f%% di R | %s",
+                                  tag, DoubleToString(atr, _Digits), DoubleToString(R, _Digits), eur, cap,
+                                  100.0 * spread * _Point / R, state);
      }
-   return(false);
+
+   string all = "";
+   for(int i = 0; i < N_STRATEGIES + 2; i++) all += lines[i] + "\n";
+   Comment(all);
+
+   int every = InpStatusEveryMin;
+   if(every <= 0) return;
+   if(MQLInfoInteger(MQL_TESTER)) every = MathMax(every, 60);   // nel tester non intasare il journal
+   if(g_lastStatusLog != 0 && now - g_lastStatusLog < every * 60) return;
+   g_lastStatusLog = now;
+   for(int i = 0; i < N_STRATEGIES + 2; i++) Print(lines[i]);
   }
 
 //+------------------------------------------------------------------+
@@ -844,28 +984,33 @@ void OnTick()
    // 1. Gestione: sempre, senza filtri
    if(total > 0) ManageAllPositions(perStrategy, total);
    total = CountPositions(perStrategy);
-   if(total >= InpMaxPositions) return;
 
    // 2. Filtri globali per i nuovi ingressi
-   if(!GlobalEntryFiltersOk()) return;
-
-   double lots = NormalizeLot(InpLotSize);
-
-   // 3. Strategie: una posizione per strategia, una apertura per candela
-   for(int i = 0; i < N_STRATEGIES; i++)
+   g_globalWhy = "";
+   if(total >= InpMaxPositions)
+      g_globalWhy = StringFormat("%d/%d posizioni aperte", total, InpMaxPositions);
+   else if(GlobalEntryFiltersOk())
      {
-      if(!S[i].enabled || perStrategy[i] > 0) continue;
-      if(iTime(_Symbol, S[i].tf, 0) == S[i].lastEntryBar) continue;
+      double lots = NormalizeLot(InpLotSize);
 
-      bool opened = false;
-      switch(i)
+      // 3. Strategie: una posizione per strategia, una apertura per candela
+      for(int i = 0; i < N_STRATEGIES; i++)
         {
-         case IDX_RNG: opened = TryRNG(lots); break;
-         case IDX_MOM: opened = TryMOM(lots); break;
-         case IDX_BRK: opened = TryBRK(lots); break;
-         case IDX_PB:  opened = TryPB(lots);  break;
+         if(!S[i].enabled || perStrategy[i] > 0) continue;
+         if(iTime(_Symbol, S[i].tf, 0) == S[i].lastEntryBar) { g_why[i] = "già entrata su questa candela"; continue; }
+
+         bool opened = false;
+         switch(i)
+           {
+            case IDX_RNG: opened = TryRNG(lots); break;
+            case IDX_MOM: opened = TryMOM(lots); break;
+            case IDX_BRK: opened = TryBRK(lots); break;
+            case IDX_PB:  opened = TryPB(lots);  break;
+           }
+         if(opened) { total++; perStrategy[i]++; break; }   // massimo un ingresso per tick
         }
-      if(opened) return;   // massimo un ingresso per tick
      }
+
+   ReportStatus(total, perStrategy);
   }
 //+------------------------------------------------------------------+
