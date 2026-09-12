@@ -4,6 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
 #property version   "7.20"
+#define BOT_VERSION "7.20"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -226,7 +227,7 @@ int OnInit()
 
    double lots   = NormalizeLot(InpLotSize);
    long   spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   PrintFormat("ScalperBot v7.1 su %s | digits %d | point %s | contratto %.2f | tick value %.4f | tick size %s | stops level %d pt | spread ora %d pt",
+   PrintFormat("ScalperBot v" + BOT_VERSION + " su %s | digits %d | point %s | contratto %.2f | tick value %.4f | tick size %s | stops level %d pt | spread ora %d pt",
                _Symbol, _Digits, DoubleToString(_Point, _Digits), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), _Digits),
                (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), (int)spread);
@@ -957,7 +958,7 @@ void ReportStatus(int total, int &perStrategy[])
    double lots = NormalizeLot(InpLotSize);
    string lines[N_STRATEGIES + 2];
 
-   lines[0] = StringFormat("ScalperBot v7.1 | %s | spread %d pt = %.2f€ a %.2f lotti | posizioni %d/%d | %s",
+   lines[0] = StringFormat("ScalperBot v" + BOT_VERSION + " | %s | spread %d pt = %.2f€ a %.2f lotti | posizioni %d/%d | %s",
                            _Symbol, (int)spread, PriceToMoney(spread * _Point, lots), lots, total, InpMaxPositions,
                            TimeToString(now, TIME_DATE | TIME_MINUTES));
    lines[1] = (g_globalWhy == "") ? "ingressi: aperti" : "INGRESSI BLOCCATI: " + g_globalWhy;
