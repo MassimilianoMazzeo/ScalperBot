@@ -71,6 +71,10 @@ Primo giro reale su BTCUSD (Fusion demo, 12 set): spread $18 = **122-153 % dello
 - `InpLotMode = LOT_RISK_PCT` (default): lotto = `min(capitale × InpRiskPct %, InpMaxLossMoney) / rischio per lotto`, mai sopra `InpLotSize` (che diventa il lotto massimo). Uguale su oro e BTC.
 - Per BTC usare timeframe più alti: RNG M15, MOM M15, BRK M30, PB H1.
 
+## v7.30 — obiettivo giornaliero
+
+`InpDailyTarget` (€, 0 = off): raggiunto il profitto del giorno (realizzato + flottante), niente nuovi ingressi fino a domani; le posizioni aperte continuano con la loro gestione. La prima riga dello stato mostra `oggi +X€ / target +Y€ / max -Z€`.
+
 ## Come testarla (Strategy Tester)
 
 1. Copiare `ScalperBot.mq5` in `MQL5/Experts/`, aprirlo in MetaEditor, **Compile** (F7).

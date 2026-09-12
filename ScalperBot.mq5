@@ -3,8 +3,8 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.20"
-#define BOT_VERSION "7.20"
+#property version   "7.30"
+#define BOT_VERSION "7.30"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -82,6 +82,7 @@ input bool     InpCommissionPerSide = true;  // Commissione addebitata sia in en
 
 input group "--- Protezioni giornaliere ---"
 input double   InpMaxDailyLoss   = 150.0;    // Perdita massima giornaliera (€), 0 = off
+input double   InpDailyTarget    = 0.0;      // Obiettivo giornaliero (€): raggiunto, niente nuovi ingressi; 0 = off
 input int      InpMaxConsecLosses = 3;       // Perdite consecutive prima della pausa, 0 = off
 input int      InpPauseMinutes   = 60;       // Durata pausa dopo le perdite consecutive
 input int      InpMinSecBetweenTrades = 30;  // Attesa minima tra due ingressi (secondi)
@@ -434,7 +435,7 @@ bool GlobalEntryFiltersOk()
       if(!inside) { g_globalWhy = StringFormat("fuori fascia oraria %02d-%02d (ora server %02d)", InpStartHour, InpEndHour, t.hour); return(false); }
      }
 
-   if(InpMaxDailyLoss > 0.0 || InpMaxConsecLosses > 0)
+   if(InpMaxDailyLoss > 0.0 || InpMaxConsecLosses > 0 || InpDailyTarget > 0.0)
      {
       double realized; int consec; datetime lastLoss;
       TodayStats(realized, consec, lastLoss);
@@ -453,9 +454,20 @@ bool GlobalEntryFiltersOk()
             return(false);
            }
         }
+      double dailyPnL = realized + FloatingNetPnL();
+      if(InpDailyTarget > 0.0 && dailyPnL >= InpDailyTarget)
+        {
+         static datetime lastTargetLog = 0;
+         if(now - lastTargetLog > 600)
+           {
+            PrintFormat("OBIETTIVO GIORNALIERO raggiunto: %+.2f€ (target %.0f€). Nessun nuovo ingresso oggi.", dailyPnL, InpDailyTarget);
+            lastTargetLog = now;
+           }
+         g_globalWhy = StringFormat("obiettivo raggiunto: oggi %+.2f€ (target %.0f€)", dailyPnL, InpDailyTarget);
+         return(false);
+        }
       if(InpMaxDailyLoss > 0.0)
         {
-         double dailyPnL = realized + FloatingNetPnL();
          if(dailyPnL <= -MathAbs(InpMaxDailyLoss))
            {
             static datetime lastWarn = 0;
@@ -958,9 +970,13 @@ void ReportStatus(int total, int &perStrategy[])
    double lots = NormalizeLot(InpLotSize);
    string lines[N_STRATEGIES + 2];
 
-   lines[0] = StringFormat("ScalperBot v" + BOT_VERSION + " | %s | spread %d pt = %.2f€ a %.2f lotti | posizioni %d/%d | %s",
-                           _Symbol, (int)spread, PriceToMoney(spread * _Point, lots), lots, total, InpMaxPositions,
-                           TimeToString(now, TIME_DATE | TIME_MINUTES));
+   double realized; int consec; datetime lastLoss;
+   TodayStats(realized, consec, lastLoss);
+   double todayPnL = realized + FloatingNetPnL();
+   string goal = (InpDailyTarget > 0.0) ? StringFormat(" / target +%.0f€", InpDailyTarget) : "";
+   lines[0] = StringFormat("ScalperBot v" + BOT_VERSION + " | %s | spread %d pt = %.2f€ | posizioni %d/%d | oggi %+.2f€%s / max -%.0f€ | %s",
+                           _Symbol, (int)spread, PriceToMoney(spread * _Point, lots), total, InpMaxPositions,
+                           todayPnL, goal, InpMaxDailyLoss, TimeToString(now, TIME_DATE | TIME_MINUTES));
    lines[1] = (g_globalWhy == "") ? "ingressi: aperti" : "INGRESSI BLOCCATI: " + g_globalWhy;
 
    for(int i = 0; i < N_STRATEGIES; i++)
