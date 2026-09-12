@@ -64,6 +64,13 @@ Guardare le 6 righe sul grafico. Casi tipici:
 | `INGRESSI BLOCCATI: fuori fascia oraria` | `InpStartHour/EndHour` | controllare l'ora server |
 | `ATR non pronto` per più di un minuto | il simbolo non ha storico su quel timeframe | aprire un grafico di quel timeframe per scaricarlo |
 
+## v7.20 — lotto in % del capitale
+
+Primo giro reale su BTCUSD (Fusion demo, 12 set): spread $18 = **122-153 % dello stop su M1**, 49 % su M5, 21 % su M15. Su BTC a questo broker lo scalping sotto M15 non è possibile, l'EA lo rifiuta e lo scrive. E a 0.25 lotti il rischio per trade su BTC era 3-19 €, su oro 60 €: il lotto fisso non ha senso su strumenti diversi.
+
+- `InpLotMode = LOT_RISK_PCT` (default): lotto = `min(capitale × InpRiskPct %, InpMaxLossMoney) / rischio per lotto`, mai sopra `InpLotSize` (che diventa il lotto massimo). Uguale su oro e BTC.
+- Per BTC usare timeframe più alti: RNG M15, MOM M15, BRK M30, PB H1.
+
 ## Come testarla (Strategy Tester)
 
 1. Copiare `ScalperBot.mq5` in `MQL5/Experts/`, aprirlo in MetaEditor, **Compile** (F7).

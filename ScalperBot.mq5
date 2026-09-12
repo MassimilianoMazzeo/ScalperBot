@@ -3,7 +3,7 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.10"
+#property version   "7.20"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -44,8 +44,9 @@ enum ENUM_SL_MODE
 
 enum ENUM_LOT_MODE
   {
-   LOT_FIT_RISK,    // Riduci il lotto finché il rischio rientra nel tetto
-   LOT_FIXED_SKIP   // Lotto fisso: se il rischio supera il tetto salta l'ingresso
+   LOT_RISK_PCT,    // Lotto calcolato: rischia InpRiskPct % del capitale per trade (entro il tetto in euro)
+   LOT_FIT_RISK,    // Lotto fisso InpLotSize, ridotto se il rischio supera il tetto
+   LOT_FIXED_SKIP   // Lotto fisso InpLotSize: se il rischio supera il tetto salta l'ingresso
   };
 
 enum ENUM_BOX_MODE
@@ -56,8 +57,9 @@ enum ENUM_BOX_MODE
 
 // --- PARAMETRI DI INPUT
 input group "--- Generali ---"
-input double   InpLotSize        = 0.25;     // Lotto per posizione
-input ENUM_LOT_MODE InpLotMode   = LOT_FIT_RISK; // Se il rischio supera il tetto: riduci il lotto o salta
+input ENUM_LOT_MODE InpLotMode   = LOT_RISK_PCT; // Come si calcola il lotto
+input double   InpRiskPct        = 2.0;      // Rischio per trade in % del capitale (modo LOT_RISK_PCT)
+input double   InpLotSize        = 0.25;     // Lotto fisso (modi LOT_FIT_RISK / LOT_FIXED_SKIP) e lotto massimo in LOT_RISK_PCT
 input ulong    InpMagicBase      = 998870;   // Magic number base (ogni strategia usa base+indice)
 input int      InpMaxPositions   = 2;        // Posizioni aperte massime (tutte le strategie)
 input double   InpMaxSpreadPctR  = 25.0;     // Spread massimo in % dello Stop Loss (R) della strategia
@@ -228,10 +230,10 @@ int OnInit()
                _Symbol, _Digits, DoubleToString(_Point, _Digits), SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE),
                SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), _Digits),
                (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), (int)spread);
-   PrintFormat("Lotto %.2f: 1 punto = %.4f€, spread ora = %.2f€ | tetto %.0f€ = %s di prezzo | lotto %s",
-               lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), InpMaxLossMoney,
-               DoubleToString(MoneyToPrice(InpMaxLossMoney, lots), _Digits),
-               (InpLotMode == LOT_FIT_RISK) ? "ridotto se il rischio supera il tetto" : "fisso, salta se il rischio supera il tetto");
+   string lotMode = (InpLotMode == LOT_RISK_PCT) ? StringFormat("calcolato: %.1f%% di %.0f€ = %.0f€ a trade (max %.2f lotti)", InpRiskPct, AccountInfoDouble(ACCOUNT_EQUITY), AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0, InpLotSize)
+                    : (InpLotMode == LOT_FIT_RISK) ? "fisso, ridotto se il rischio supera il tetto" : "fisso, salta se il rischio supera il tetto";
+   PrintFormat("Lotto max %.2f: 1 punto = %.4f€, spread ora = %.2f€ | tetto %.0f€ | lotto %s",
+               lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), InpMaxLossMoney, lotMode);
    if(InpMaxSpread > 0 && spread > InpMaxSpread)
       PrintFormat("ATTENZIONE: spread %d pt > InpMaxSpread %d: nessun ingresso finché non scende", (int)spread, InpMaxSpread);
    return(INIT_SUCCEEDED);
@@ -504,12 +506,27 @@ bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, dou
       return(false);
      }
 
-   // Tetto di perdita: riduci il lotto oppure salta
+   // Lotto dal rischio: X% del capitale, entro il tetto in euro e il lotto massimo
    double riskPerLot = PriceToMoney(slDist, 1.0);
-   double riskMoney  = riskPerLot * lots;
+   if(InpLotMode == LOT_RISK_PCT)
+     {
+      if(riskPerLot <= 0.0) { g_why[idx] = "tick value non disponibile"; return(false); }
+      double budget = MathMin(AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0, InpMaxLossMoney);
+      double wanted = budget / riskPerLot;
+      double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      if(wanted < minLot)
+        {
+         g_why[idx] = StringFormat("rischio %.0f€ al lotto minimo > budget %.0f€", riskPerLot * minLot, budget);
+         return(false);
+        }
+      lots = NormalizeLot(MathMin(wanted, InpLotSize));
+     }
+   double riskMoney = riskPerLot * lots;
+
+   // Tetto di perdita in euro: riduci il lotto oppure salta
    if(riskMoney > InpMaxLossMoney + 0.01)
      {
-      if(InpLotMode == LOT_FIT_RISK && riskPerLot > 0.0)
+      if(InpLotMode != LOT_FIXED_SKIP && riskPerLot > 0.0)
         {
          double fitted = NormalizeLot(InpMaxLossMoney / riskPerLot);
          if(riskPerLot * fitted > InpMaxLossMoney + 0.01)
@@ -954,10 +971,18 @@ void ReportStatus(int total, int &perStrategy[])
       double R   = atr * S[i].slAtr;
       double eur = PriceToMoney(R, lots);
       string cap = "";
-      if(eur > InpMaxLossMoney) cap = (InpLotMode == LOT_FIT_RISK) ? StringFormat(" -> lotto %.2f", NormalizeLot(InpMaxLossMoney / PriceToMoney(R, 1.0))) : " > TETTO";
+      double perLot = PriceToMoney(R, 1.0);
+      if(InpLotMode == LOT_RISK_PCT && perLot > 0.0)
+        {
+         double budget = MathMin(AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0, InpMaxLossMoney);
+         double l = NormalizeLot(MathMin(budget / perLot, InpLotSize));
+         cap = StringFormat(" | lotto %.2f = %.0f€", l, perLot * l);
+        }
+      else if(eur > InpMaxLossMoney) cap = (InpLotMode == LOT_FIT_RISK) ? StringFormat(" -> lotto %.2f", NormalizeLot(InpMaxLossMoney / perLot)) : " > TETTO";
       string state = (perStrategy[i] > 0) ? "IN POSIZIONE" : g_why[i];
-      lines[i + 2] = StringFormat("%s | ATR %s | R %s = %.0f€%s | spread %.0f%% di R | %s",
-                                  tag, DoubleToString(atr, _Digits), DoubleToString(R, _Digits), eur, cap,
+      lines[i + 2] = StringFormat("%s | ATR %s | R %s%s | spread %.0f%% di R | %s",
+                                  tag, DoubleToString(atr, _Digits), DoubleToString(R, _Digits),
+                                  (InpLotMode == LOT_RISK_PCT) ? cap : StringFormat(" = %.0f€%s", eur, cap),
                                   100.0 * spread * _Point / R, state);
      }
 
