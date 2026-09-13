@@ -4,7 +4,7 @@ Expert Advisor MQL5 per MetaTrader 5, pensato per **XAUUSD** su conto hedging (f
 
 ## v7.00 — multi-strategia, multi-timeframe
 
-Quattro strategie indipendenti, ognuna con il **suo timeframe** e il suo magic number (`InpMagicBase + indice`). Al massimo una posizione per strategia e `InpMaxPositions` totali. Si mette su un grafico qualsiasi del simbolo: il timeframe del grafico non conta.
+Quattro strategie indipendenti (dalla v7.40 solo BRK e PB attive di default, vedi in fondo), ognuna con il **suo timeframe** e il suo magic number (`InpMagicBase + indice`). Al massimo una posizione per strategia e `InpMaxPositions` totali. Si mette su un grafico qualsiasi del simbolo: il timeframe del grafico non conta.
 
 | # | Tag | Idea | TF default | Runner |
 |---|---|---|---|---|
@@ -74,6 +74,33 @@ Primo giro reale su BTCUSD (Fusion demo, 12 set): spread $18 = **122-153 % dello
 ## v7.30 — obiettivo giornaliero
 
 `InpDailyTarget` (€, 0 = off): raggiunto il profitto del giorno (realizzato + flottante), niente nuovi ingressi fino a domani; le posizioni aperte continuano con la loro gestione. La prima riga dello stato mostra `oggi +X€ / target +Y€ / max -Z€`.
+
+## v7.40 — backtest a tick reali: MOM e RNG spente di default
+
+Primi backtest veri (Strategy Tester, XAUUSD FusionMarkets-Demo, rischio 2 %, target +500 / max −250 al giorno, 13 set 2026):
+
+| Configurazione | Periodo | Tick | Risultato |
+|---|---|---|---|
+| tutte e 4 (RNG M1, MOM M1, BRK M5, PB M15) | 10 ago – 12 set | **generati** da M1 | +4438 € — 3009 trade, 86 al giorno, PF 1.17, DD 21 % |
+| tutte e 4 | 1 – 12 set | **reali** | **−814 $** — 1119 trade, PF 0.82, DD 74 % |
+| MOM/RNG M5, BRK M15, PB H1 | 1 – 12 set | reali | −452 $ |
+| MOM/RNG M15, BRK M30, PB H1 | 1 – 12 set | reali | −193 $ |
+| solo BRK M5 + PB M15 | 1 – 12 set | reali | +80 $ — PF 1.20 |
+| **solo BRK M5 + PB M15** | 10 ago – 12 set | reali | **+226 $** — 246 trade, 8 al giorno, PF 1.19, DD 11 %, 14 giorni su 25 positivi, peggior giorno −106 $ |
+
+Cosa dice:
+
+- **MOM su M1 perde con i tick reali** a qualsiasi timeframe provato. Il +4438 € era un artefatto dei tick generati: dentro la candela M1 il tester inventa il percorso del prezzo e il BE a +0.5R / scalp a +1R «funzionano» sempre; con la sequenza vera dei tick vengono presi in mezzo (39 % di vincite, media +5.65 / −10.15). **Mai fidarsi di «Every tick» generato per lo scalping M1.**
+- **RNG non è mai entrata** in 5 settimane: sull'oro M1 l'ADX(14) sta sotto 20 quasi mai (90 % delle volte «mercato non laterale»).
+- **BRK e PB** sono le uniche in positivo con i tick reali, entrambe. Poche operazioni (8 al giorno), durata media 47 minuti: non è più uno scalping M1, ma è quello che regge.
+- Con il 2 % di rischio l'aspettativa è di circa **+45 $ a settimana** su 1000: il target giornaliero di 500 € non è raggiungibile, la perdita massima giornaliera vista è −106 $.
+
+Modifiche:
+
+- `InpMomEnabled = false`, `InpRngEnabled = false` di default. Riattivarle solo dopo un backtest a tick reali che le giustifichi.
+- `InpTrailStepPctR` (10 %): il trailing del runner sposta lo SL solo se migliora di almeno il 10 % di R. Prima lo modificava a ogni tick (decine di richieste al secondo), un broker reale le rifiuta o le rallenta.
+
+Per riprodurre senza GUI (MetaTrader su Mac/Wine): un file `tester.ini` (UTF-16LE con BOM) con sezione `[Tester]` (`Expert=ScalperBot\ScalperBot.ex5`, `Symbol=XAUUSD`, `Model=4` per i tick reali, `FromDate`, `ToDate`, `Deposit`, `Currency=USD` — con `EUR` il broker non ha i tick di XAUEUR e il test si ferma —, `Report=nome`, `ShutdownTerminal=1`) e `[TesterInputs]` con `InpX=valore||valore||0||0||N`; poi `terminal64.exe /config:tester.ini`. Il report esce come `nome.htm` nella cartella del terminale.
 
 ## Come testarla (Strategy Tester)
 
