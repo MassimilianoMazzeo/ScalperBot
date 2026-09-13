@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
 #property version   "7.30"
-#define BOT_VERSION "7.30"
+#define BOT_VERSION "7.40"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -78,6 +78,7 @@ input double   InpScalpPct       = 50.0;     // % di posizione chiusa allo scalp
 input double   InpLockR          = 0.5;      // Dopo lo scalp, SL a +X R
 input double   InpTp2R           = 3.0;      // Target finale del runner (R)
 input double   InpTrailAtrMult   = 1.5;      // Trailing del runner: estremo dall'ingresso - ATR x X
+input double   InpTrailStepPctR  = 10.0;     // Trailing: sposta lo SL solo se migliora di almeno X% di R
 input bool     InpCommissionPerSide = true;  // Commissione addebitata sia in entrata che in uscita
 
 input group "--- Protezioni giornaliere ---"
@@ -96,7 +97,7 @@ input double   InpAdxTrendMin    = 22.0;     // MOM e PB solo se ADX >= X (merca
 input int      InpAtrPeriod      = 14;
 
 input group "--- 0. RNG: range mean-reversion ---"
-input bool     InpRngEnabled     = true;
+input bool     InpRngEnabled     = false;
 input ENUM_TIMEFRAMES InpRngTf   = PERIOD_M1;
 input int      InpRngCandles     = 20;       // Candele chiuse che definiscono il box
 input double   InpRngMaxAtr      = 1.5;      // Ampiezza massima del box (x ATR)
@@ -106,7 +107,7 @@ input double   InpRngSlAtr       = 0.8;      // SL (x ATR)
 input double   InpRngMinRR       = 0.8;      // Rapporto minimo TP/SL per entrare
 
 input group "--- 1. MOM: momentum candela ---"
-input bool     InpMomEnabled     = true;
+input bool     InpMomEnabled     = false;
 input ENUM_TIMEFRAMES InpMomTf   = PERIOD_M1;
 input double   InpMomMinBodyAtr  = 0.6;      // Corpo minimo candela corrente (x ATR)
 input double   InpMomMaxBodyAtr  = 1.8;      // Corpo massimo: oltre non si insegue (x ATR)
@@ -723,6 +724,9 @@ void ManagePosition(ulong ticket, int &perStrategy[], int total)
            }
         }
      }
+   // Il trailing si muove a scatti (min % di R): niente modifica a ogni tick
+   if(why == "trail" && MathAbs(newSL - PositionGetDouble(POSITION_SL)) < InpTrailStepPctR / 100.0 * R)
+      newSL = 0.0;
    if(newSL > 0.0) TightenStopLoss(ticket, newSL, why);
 
    // Piramide opzionale: una sola per strategia, tra BE e scalp
