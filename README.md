@@ -102,6 +102,34 @@ Modifiche:
 
 Per riprodurre senza GUI (MetaTrader su Mac/Wine): un file `tester.ini` (UTF-16LE con BOM) con sezione `[Tester]` (`Expert=ScalperBot\ScalperBot.ex5`, `Symbol=XAUUSD`, `Model=4` per i tick reali, `FromDate`, `ToDate`, `Deposit`, `Currency=USD` — con `EUR` il broker non ha i tick di XAUEUR e il test si ferma —, `Report=nome`, `ShutdownTerminal=1`) e `[TesterInputs]` con `InpX=valore||valore||0||0||N`; poi `terminal64.exe /config:tester.ini`. Il report esce come `nome.htm` nella cartella del terminale.
 
+## v7.50 — controtrend H1 e memoria degli errori
+
+Un giorno intero di live sul demo (14 set 2026, 116 operazioni del bot) più 20 backtest a tick reali sulle 5 settimane 10 ago – 14 set (deposito 1000 $, rischio 4 %, target +500 / max −250 al giorno, 3 posizioni):
+
+| Configurazione | Netto | Op/giorno | PF | DD max |
+|---|---|---|---|---|
+| BRK M5 + PB M5 (v7.40, com'era live) | +497 $ | 22 | 1.09 | 45 % |
+| stessa + filtro H1 **a favore** del trend | −381 $ | 15 | 0.84 | 56 % |
+| stessa + memoria | +682 $ | 22 | 1.12 | 45 % |
+| **stessa + filtro H1 CONTROTREND** | **+1244 $** | **8** | **1.61** | **22 %** |
+| stessa + controtrend + memoria | +1244 $ | 8 | 1.61 | 22 % |
+| tutto su M1, MOM accesa, 5 posizioni, 1 % (provata live il 14 set) | −919 $ | 165 | 0.81 | 92 % |
+| M1 senza MOM + memoria | −690 $ | 89 | 0.84 | 70 % |
+
+Cosa dice:
+
+- **Sull'oro BRK e PB su M5 pagano contro il trend orario, non a favore.** Prezzo sotto la EMA50 H1 che scende → solo buy; sopra e sale → solo sell. Il filtro «classico» a favore del trend taglia proprio le inversioni che rendono e passa da +497 a −381 $. Ribaltato, raddoppia il netto e dimezza il drawdown con un terzo delle operazioni.
+- **La memoria funziona ma vale meno del filtro**: +497 → +682 $ sulla base. Con il controtrend attivo non cambia il risultato perché le combinazioni che avrebbe bloccato sono già filtrate. Resta accesa: lavora sui giorni futuri, non su quelli del test.
+- **Lo scalping M1 ad alta frequenza perde in ogni forma provata.** Live il 14 set: 109 operazioni in 14 ore, +30 €, vincita media +6.7 / perdita media −9.6, 27 € di commissioni. Nel backtest brucia il 92 % del conto in 5 settimane. Chiuso.
+
+Modifiche:
+
+- **Filtro di direzione** (`InpTrendFilter`, EMA `InpTrendEma` = 50 su `InpTrendTf` = H1, con pendenza se `InpTrendNeedSlope`): vale per tutte le strategie, controllato dentro `OpenPosition`. `InpTrendInvert = true` di default: opera **contro** il verso dell'H1. Il motivo del rifiuto compare nello stato («segnale PB buy nel verso del trend H1»).
+- **Memoria** (`InpLearnEnabled`): a ogni chiusura, e comunque ogni 15 minuti, il bot rilegge il proprio storico degli ultimi `InpLearnDays` (10) giorni, somma i risultati **in R** per strategia / verso / fascia di `InpLearnHourBlock` (3) ore server, e blocca le combinazioni con almeno `InpLearnMinTrades` (8) trade e somma ≤ `InpLearnBlockR` (−3 R). Finestra scorrevole: quando le vecchie perdite escono dai 10 giorni la combinazione viene riabilitata da sola. Log: `IMPARATO: PB buy 12-15 bloccata (-3.6R su 8 trade)`, `MEMORIA: ... riabilitata`. L'ultima riga dello stato elenca le combinazioni bloccate e il verso dell'H1.
+- Il rischio iniziale in euro viaggia nel **commento dell'ordine** (`PB sell r38.14`): nello storico del tester `ORDER_SL` torna 0, dal commento la memoria ricostruisce R anche lì.
+
+Per riprodurre in parallelo su Mac: cloni APFS della cartella del terminale (`cp -Rc`), ognuno lanciato con `terminal64.exe /portable /config:...`. Due tester avviati nello stesso secondo collidono sulla porta 3000 («authorization failed»): sfalsarli di 20–30 s.
+
 ## Come testarla (Strategy Tester)
 
 1. Copiare `ScalperBot.mq5` in `MQL5/Experts/`, aprirlo in MetaEditor, **Compile** (F7).
