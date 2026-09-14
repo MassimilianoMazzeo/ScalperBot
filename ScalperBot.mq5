@@ -3,8 +3,8 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.30"
-#define BOT_VERSION "7.40"
+#property version   "7.50"
+#define BOT_VERSION "7.50"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -29,6 +29,12 @@ CTrade trade;
 //| lotto ridotto se il rischio supera il tetto, BE che copre le     |
 //| commissioni reali, stato sempre visibile sul grafico e nel       |
 //| journal con il motivo per cui ogni strategia sta aspettando.     |
+//|                                                                  |
+//| v7.50: filtro di direzione sul timeframe alto (EMA H1) per tutte |
+//| le strategie, e MEMORIA: il bot rilegge il proprio storico e     |
+//| blocca le combinazioni strategia/verso/fascia oraria che negli   |
+//| ultimi giorni hanno perso (finestra scorrevole: le riprova       |
+//| quando le vecchie perdite escono dalla finestra).                |
 //+------------------------------------------------------------------+
 
 #define N_STRATEGIES 4
@@ -95,6 +101,20 @@ input int      InpAdxPeriod      = 14;
 input double   InpAdxRangeMax    = 20.0;     // RNG solo se ADX < X (mercato laterale)
 input double   InpAdxTrendMin    = 22.0;     // MOM e PB solo se ADX >= X (mercato direzionale)
 input int      InpAtrPeriod      = 14;
+
+input group "--- Filtro di direzione (timeframe alto) ---"
+input bool            InpTrendFilter    = true;       // Opera solo nel verso del trend del timeframe alto
+input ENUM_TIMEFRAMES InpTrendTf        = PERIOD_H1;  // Timeframe del trend
+input int             InpTrendEma       = 50;         // Periodo della EMA di trend
+input bool            InpTrendNeedSlope = true;       // Serve anche la EMA inclinata nel verso (no = basta prezzo sopra/sotto)
+input bool            InpTrendInvert    = false;      // Controtrend: opera solo CONTRO il verso del timeframe alto
+
+input group "--- Memoria: impara dagli errori ---"
+input bool     InpLearnEnabled   = true;   // Blocca le combinazioni strategia/verso/fascia oraria in perdita
+input int      InpLearnDays      = 10;     // Giorni di storico considerati (finestra scorrevole)
+input int      InpLearnMinTrades = 8;      // Trade minimi nella combinazione prima di giudicarla
+input double   InpLearnBlockR    = -3.0;   // Blocco se la somma dei risultati in R e' sotto questa soglia
+input int      InpLearnHourBlock = 3;      // Ampiezza della fascia oraria (ore server)
 
 input group "--- 0. RNG: range mean-reversion ---"
 input bool     InpRngEnabled     = false;
@@ -173,6 +193,22 @@ string   g_why[N_STRATEGIES];    // perché ogni strategia sta aspettando (mostr
 string   g_globalWhy   = "";     // perché gli ingressi sono bloccati per tutte
 datetime g_lastStatusLog = 0;
 
+// Filtro di direzione
+int      g_hTrend = INVALID_HANDLE;
+
+// Memoria: risultati per strategia / verso (0 buy, 1 sell) / fascia oraria
+#define LEARN_MAX_BLOCKS 24
+struct LearnBucket
+  {
+   int    n;
+   double sumR;
+   bool   blocked;
+  };
+LearnBucket g_mem[N_STRATEGIES][2][LEARN_MAX_BLOCKS];
+datetime g_memBuilt  = 0;
+int      g_prevTotal = 0;
+int      g_memBlocked = 0;
+
 //+------------------------------------------------------------------+
 //| Init                                                             |
 //+------------------------------------------------------------------+
@@ -227,6 +263,21 @@ int OnInit()
 
    for(int i = 0; i < N_STRATEGIES; i++) g_why[i] = "in attesa del primo tick";
 
+   if(InpTrendFilter)
+     {
+      g_hTrend = iMA(_Symbol, InpTrendTf, InpTrendEma, 0, MODE_EMA, PRICE_CLOSE);
+      if(g_hTrend == INVALID_HANDLE) { Print("ERRORE: EMA di trend non creata"); return(INIT_FAILED); }
+     }
+   if(InpLearnEnabled && (InpLearnHourBlock < 1 || InpLearnHourBlock > 24 || InpLearnDays < 1 || InpLearnMinTrades < 1))
+     {
+      Print("ERRORE: InpLearnHourBlock 1-24, InpLearnDays >= 1, InpLearnMinTrades >= 1");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
+   for(int i = 0; i < N_STRATEGIES; i++)
+      for(int d = 0; d < 2; d++)
+         for(int h = 0; h < LEARN_MAX_BLOCKS; h++) { g_mem[i][d][h].n = 0; g_mem[i][d][h].sumR = 0.0; g_mem[i][d][h].blocked = false; }
+   g_memBuilt = 0;
+
    double lots   = NormalizeLot(InpLotSize);
    long   spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    PrintFormat("ScalperBot v" + BOT_VERSION + " su %s | digits %d | point %s | contratto %.2f | tick value %.4f | tick size %s | stops level %d pt | spread ora %d pt",
@@ -239,6 +290,8 @@ int OnInit()
                lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), InpMaxLossMoney, lotMode);
    if(InpMaxSpread > 0 && spread > InpMaxSpread)
       PrintFormat("ATTENZIONE: spread %d pt > InpMaxSpread %d: nessun ingresso finché non scende", (int)spread, InpMaxSpread);
+   if(InpTrendFilter) PrintFormat("Filtro di direzione: EMA%d %s%s%s", InpTrendEma, TfName(InpTrendTf), InpTrendNeedSlope ? " con pendenza" : "", InpTrendInvert ? " (CONTROTREND)" : "");
+   if(InpLearnEnabled) PrintFormat("Memoria: ultimi %d giorni, fasce di %d ore, blocco sotto %.1fR con almeno %d trade", InpLearnDays, InpLearnHourBlock, InpLearnBlockR, InpLearnMinTrades);
    return(INIT_SUCCEEDED);
   }
 
@@ -252,6 +305,7 @@ void OnDeinit(const int reason)
       if(S[i].hEmaFast != INVALID_HANDLE) IndicatorRelease(S[i].hEmaFast);
       if(S[i].hEmaSlow != INVALID_HANDLE) IndicatorRelease(S[i].hEmaSlow);
      }
+   if(g_hTrend != INVALID_HANDLE) IndicatorRelease(g_hTrend);
   }
 
 //+------------------------------------------------------------------+
@@ -498,11 +552,191 @@ bool LogTradeResult(string context)
   }
 
 //+------------------------------------------------------------------+
+//| Filtro di direzione: +1 trend su, -1 giu', 0 neutro/non pronto   |
+//+------------------------------------------------------------------+
+int TrendDir(string &why)
+  {
+   why = "";
+   double e1 = Ind(g_hTrend, 0, 1), e3 = Ind(g_hTrend, 0, 3);
+   double c1 = iClose(_Symbol, InpTrendTf, 1);
+   if(e1 == EMPTY_VALUE || e3 == EMPTY_VALUE || c1 <= 0.0) { why = "EMA di trend non pronta"; return(0); }
+   bool up = (c1 > e1) && (!InpTrendNeedSlope || e1 > e3);
+   bool dn = (c1 < e1) && (!InpTrendNeedSlope || e1 < e3);
+   if(up) return(1);
+   if(dn) return(-1);
+   why = StringFormat("%s neutro (prezzo %s EMA%d, EMA %s)", TfName(InpTrendTf), (c1 > e1) ? "sopra" : "sotto", InpTrendEma, (e1 > e3) ? "sale" : "scende");
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+//| Memoria: rilegge lo storico del conto (solo i nostri magic) e    |
+//| somma i risultati in R per strategia / verso / fascia oraria.    |
+//| Una combinazione con almeno InpLearnMinTrades trade e somma      |
+//| <= InpLearnBlockR viene bloccata finche' le vecchie perdite non  |
+//| escono dalla finestra di InpLearnDays giorni.                    |
+//+------------------------------------------------------------------+
+string LearnBucketName(int idx, int dir, int hb)
+  {
+   int h0 = hb * InpLearnHourBlock, h1 = MathMin(24, h0 + InpLearnHourBlock);
+   return(StringFormat("%s %s %02d-%02d", S[idx].tag, (dir == 0) ? "buy" : "sell", h0, h1));
+  }
+
+void LearnRebuild()
+  {
+   if(!InpLearnEnabled) return;
+   datetime now = TimeCurrent();
+   g_memBuilt = now;
+   for(int i = 0; i < N_STRATEGIES; i++)
+      for(int d = 0; d < 2; d++)
+         for(int h = 0; h < LEARN_MAX_BLOCKS; h++) { g_mem[i][d][h].n = 0; g_mem[i][d][h].sumR = 0.0; }
+
+   if(!HistorySelect(now - (datetime)InpLearnDays * 86400, now + 60)) return;
+
+   // 1. deal -> posizioni (apertura: strategia, verso, ora, ordine; chiusure: P&L)
+   long   ids[];  int pidx[]; int pdir[]; int phb[]; ulong pord[]; double ppnl[]; bool pclosed[]; double prisk[];
+   int n = 0;
+   int deals = HistoryDealsTotal();
+   for(int i = 0; i < deals; i++)
+     {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0) continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol) continue;
+      int idx;
+      if(!IsOurMagic(HistoryDealGetInteger(deal, DEAL_MAGIC), idx)) continue;
+      long posId = HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+      int k = -1;
+      for(int j = 0; j < n; j++) if(ids[j] == posId) { k = j; break; }
+      if(k < 0)
+        {
+         k = n++;
+         ArrayResize(ids, n); ArrayResize(pidx, n); ArrayResize(pdir, n); ArrayResize(phb, n);
+         ArrayResize(pord, n); ArrayResize(ppnl, n); ArrayResize(pclosed, n); ArrayResize(prisk, n);
+         ids[k] = posId; pidx[k] = idx; pdir[k] = -1; phb[k] = -1; pord[k] = 0; ppnl[k] = 0.0; pclosed[k] = false; prisk[k] = 0.0;
+        }
+      double net = HistoryDealGetDouble(deal, DEAL_PROFIT) + HistoryDealGetDouble(deal, DEAL_SWAP)
+                   + HistoryDealGetDouble(deal, DEAL_COMMISSION) + HistoryDealGetDouble(deal, DEAL_FEE);
+      ppnl[k] += net;
+      long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_IN)
+        {
+         pdir[k] = (HistoryDealGetInteger(deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? 0 : 1;
+         MqlDateTime t; TimeToStruct((datetime)HistoryDealGetInteger(deal, DEAL_TIME), t);
+         phb[k]  = t.hour / InpLearnHourBlock;
+         pord[k] = (ulong)HistoryDealGetInteger(deal, DEAL_ORDER);
+         string c = HistoryDealGetString(deal, DEAL_COMMENT);
+         int rp = StringFind(c, " r");
+         if(rp >= 0) prisk[k] = StringToDouble(StringSubstr(c, rp + 2));
+        }
+      else
+         pclosed[k] = true;
+     }
+
+   // 2. rischio iniziale dall'ordine di apertura (SL) -> risultato in R
+   int used = 0, noOrder = 0, noSl = 0, noRisk = 0;
+   for(int k = 0; k < n; k++)
+     {
+      if(!pclosed[k] || pdir[k] < 0) continue;
+      double risk = prisk[k];
+      if(risk <= 0.0)   // trade aperti da versioni precedenti: rischio dallo SL dell'ordine di apertura
+        {
+         if(pord[k] == 0 || !HistoryOrderSelect(pord[k])) { noOrder++; continue; }
+         double sl    = HistoryOrderGetDouble(pord[k], ORDER_SL);
+         double price = HistoryOrderGetDouble(pord[k], ORDER_PRICE_OPEN);
+         double vol   = HistoryOrderGetDouble(pord[k], ORDER_VOLUME_INITIAL);
+         if(sl <= 0.0 || price <= 0.0 || vol <= 0.0) { noSl++; continue; }
+         risk = PriceToMoney(MathAbs(price - sl), vol);
+        }
+      if(risk <= 0.0) { noRisk++; continue; }
+      LearnBucket b = g_mem[pidx[k]][pdir[k]][phb[k]];
+      b.n++; b.sumR += ppnl[k] / risk;
+      g_mem[pidx[k]][pdir[k]][phb[k]] = b;
+      used++;
+     }
+   static int lastUsed = -1;
+   if(used != lastUsed && (used == 0 || used % 25 == 0 || !MQLInfoInteger(MQL_TESTER)))
+     {
+      lastUsed = used;
+      int bi = 0, bd = 0, bh = 0;
+      for(int i = 0; i < N_STRATEGIES; i++) for(int d = 0; d < 2; d++) for(int h = 0; h < LEARN_MAX_BLOCKS; h++)
+         if(g_mem[i][d][h].n > g_mem[bi][bd][bh].n) { bi = i; bd = d; bh = h; }
+      PrintFormat("MEMORIA: %d posizioni nello storico, %d usate (senza ordine %d, senza SL %d, senza rischio %d) | piu' popolata: %s %+.1fR su %d",
+                  n, used, noOrder, noSl, noRisk, LearnBucketName(bi, bd, bh), g_mem[bi][bd][bh].sumR, g_mem[bi][bd][bh].n);
+     }
+
+   // 3. blocchi
+   g_memBlocked = 0;
+   for(int i = 0; i < N_STRATEGIES; i++)
+      for(int d = 0; d < 2; d++)
+         for(int h = 0; h < LEARN_MAX_BLOCKS; h++)
+           {
+            bool blk = (g_mem[i][d][h].n >= InpLearnMinTrades && g_mem[i][d][h].sumR <= InpLearnBlockR);
+            if(blk != g_mem[i][d][h].blocked)
+              {
+               if(blk) PrintFormat("IMPARATO: %s bloccata (%+.1fR su %d trade negli ultimi %d giorni)", LearnBucketName(i, d, h), g_mem[i][d][h].sumR, g_mem[i][d][h].n, InpLearnDays);
+               else    PrintFormat("MEMORIA: %s riabilitata (%+.1fR su %d trade)", LearnBucketName(i, d, h), g_mem[i][d][h].sumR, g_mem[i][d][h].n);
+               g_mem[i][d][h].blocked = blk;
+              }
+            if(blk) g_memBlocked++;
+           }
+  }
+
+// Ricostruisce la memoria al primo tick, quando una posizione si chiude, e comunque ogni 15 minuti
+void LearnMaybeRebuild(int total)
+  {
+   if(!InpLearnEnabled) return;
+   datetime now = TimeCurrent();
+   bool closedSomething = (total < g_prevTotal);
+   g_prevTotal = total;
+   if(g_memBuilt == 0 || closedSomething || now - g_memBuilt >= 900) LearnRebuild();
+  }
+
+bool LearnBlocked(int idx, ENUM_ORDER_TYPE type, string &why)
+  {
+   if(!InpLearnEnabled) return(false);
+   MqlDateTime t; TimeToStruct(TimeCurrent(), t);
+   int hb = t.hour / InpLearnHourBlock;
+   int d  = (type == ORDER_TYPE_BUY) ? 0 : 1;
+   if(!g_mem[idx][d][hb].blocked) return(false);
+   why = StringFormat("memoria: %s bloccata (%+.1fR su %d)", LearnBucketName(idx, d, hb), g_mem[idx][d][hb].sumR, g_mem[idx][d][hb].n);
+   return(true);
+  }
+
+string LearnSummary()
+  {
+   if(!InpLearnEnabled) return("memoria: off");
+   if(g_memBlocked == 0) return("memoria: nessuna combinazione bloccata");
+   string s = "";
+   int shown = 0;
+   for(int i = 0; i < N_STRATEGIES; i++)
+      for(int d = 0; d < 2; d++)
+         for(int h = 0; h < LEARN_MAX_BLOCKS; h++)
+            if(g_mem[i][d][h].blocked)
+              {
+               if(shown < 6) s += ((shown > 0) ? ", " : "") + LearnBucketName(i, d, h);
+               shown++;
+              }
+   if(shown > 6) s += StringFormat(" +%d", shown - 6);
+   return(StringFormat("memoria: %d bloccate: %s", g_memBlocked, s));
+  }
+
+//+------------------------------------------------------------------+
 //| Apre una posizione della strategia idx.                          |
 //| slDist: distanza SL in prezzo (R). tpPrice>0: TP forzato (RNG).  |
 //+------------------------------------------------------------------+
 bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, double tpPrice, string comment)
   {
+   if(InpTrendFilter)
+     {
+      string why;
+      int dir  = TrendDir(why);
+      int want = (type == ORDER_TYPE_BUY) ? 1 : -1;
+      if(InpTrendInvert) want = -want;
+      if(dir == 0)    { g_why[idx] = "segnale " + comment + " ma " + why; return(false); }
+      if(dir != want) { g_why[idx] = StringFormat("segnale %s %s il trend %s (EMA%d %s)", comment, InpTrendInvert ? "nel verso del" : "contro il", TfName(InpTrendTf), InpTrendEma, (dir > 0) ? "su" : "giu'"); return(false); }
+     }
+   string memWhy;
+   if(LearnBlocked(idx, type, memWhy)) { g_why[idx] = memWhy; return(false); }
+
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double minDist = MinStopDistance();
@@ -580,9 +814,11 @@ bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, dou
    tp = NormalizeDouble(tp, _Digits);
 
    trade.SetExpertMagicNumber(InpMagicBase + (ulong)idx);
+   // Il rischio iniziale viaggia nel commento (es. "PB sell r38.14"): la memoria lo rilegge dallo storico
+   string orderComment = comment + StringFormat(" r%.2f", riskMoney);
    bool sent = (type == ORDER_TYPE_BUY)
-               ? trade.Buy(lots, _Symbol, ask, sl, tp, comment)
-               : trade.Sell(lots, _Symbol, bid, sl, tp, comment);
+               ? trade.Buy(lots, _Symbol, ask, sl, tp, orderComment)
+               : trade.Sell(lots, _Symbol, bid, sl, tp, orderComment);
    bool ok = sent && LogTradeResult(comment);
    if(ok)
      {
@@ -972,7 +1208,7 @@ void ReportStatus(int total, int &perStrategy[])
    datetime now = TimeCurrent();
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    double lots = NormalizeLot(InpLotSize);
-   string lines[N_STRATEGIES + 2];
+   string lines[N_STRATEGIES + 3];
 
    double realized; int consec; datetime lastLoss;
    TodayStats(realized, consec, lastLoss);
@@ -1007,8 +1243,14 @@ void ReportStatus(int total, int &perStrategy[])
                                   100.0 * spread * _Point / R, state);
      }
 
+   lines[N_STRATEGIES + 2] = LearnSummary();
+   if(InpTrendFilter)
+     {
+      string why; int dir = TrendDir(why);
+      lines[N_STRATEGIES + 2] += " | trend " + TfName(InpTrendTf) + ": " + ((dir > 0) ? "SU" : (dir < 0) ? "GIU'" : "neutro");
+     }
    string all = "";
-   for(int i = 0; i < N_STRATEGIES + 2; i++) all += lines[i] + "\n";
+   for(int i = 0; i < N_STRATEGIES + 3; i++) all += lines[i] + "\n";
    Comment(all);
 
    int every = InpStatusEveryMin;
@@ -1016,7 +1258,7 @@ void ReportStatus(int total, int &perStrategy[])
    if(MQLInfoInteger(MQL_TESTER)) every = MathMax(every, 60);   // nel tester non intasare il journal
    if(g_lastStatusLog != 0 && now - g_lastStatusLog < every * 60) return;
    g_lastStatusLog = now;
-   for(int i = 0; i < N_STRATEGIES + 2; i++) Print(lines[i]);
+   for(int i = 0; i < N_STRATEGIES + 3; i++) Print(lines[i]);
   }
 
 //+------------------------------------------------------------------+
@@ -1030,6 +1272,7 @@ void OnTick()
    // 1. Gestione: sempre, senza filtri
    if(total > 0) ManageAllPositions(perStrategy, total);
    total = CountPositions(perStrategy);
+   LearnMaybeRebuild(total);
 
    // 2. Filtri globali per i nuovi ingressi
    g_globalWhy = "";
