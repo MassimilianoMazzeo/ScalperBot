@@ -130,6 +130,37 @@ Modifiche:
 
 Per riprodurre in parallelo su Mac: cloni APFS della cartella del terminale (`cp -Rc`), ognuno lanciato con `terminal64.exe /portable /config:...`. Due tester avviati nello stesso secondo collidono sulla porta 3000 («authorization failed»): sfalsarli di 20–30 s.
 
+## v7.60 — non combattere i trend forti, niente stop da rumore
+
+Prima giornata sul conto reale (16 set 2026, 300 €): 4 operazioni, 4 stop, −43.65 €. L'oro è salito dritto tutto il giorno (+1 %) e il controtrend ha venduto tre volte contro il rialzo; il quarto trade, alle 00:30, aveva lo stop a 2 $ per l'ATR notturno minuscolo ed è saltato in 90 secondi (nel verso giusto). Due difetti precisi, due filtri, 12 backtest a tick reali sulle 5 settimane 10 ago – 15 set (stessa base della v7.50, ora con la memoria accesa):
+
+| Configurazione | Netto | Op/giorno | PF | DD max |
+|---|---|---|---|---|
+| v7.50 (controtrend + memoria, com'era live) | +1364 $ | 8.6 | 1.65 | 22 % |
+| + ATR minimo 2.5 | +1274 $ | 8.1 | 1.64 | 17 % |
+| + ATR minimo 3.0 | +1195 $ | 7.3 | 1.66 | 17 % |
+| + pendenza max 0.10 | +603 $ | 4.8 | 1.50 | 22 % |
+| + pendenza max 0.15 | +1266 $ | 6.0 | 1.95 | 22 % |
+| + pendenza max 0.25 | +1489 $ | 7.8 | 1.83 | 22 % |
+| + pendenza max 0.30 | +1610 $ | 8.4 | 1.84 | 22 % |
+| + pendenza max 0.35 | +1568 $ | 8.6 | 1.79 | 22 % |
+| **+ pendenza max 0.30 + ATR minimo 2.5** | **+1519 $** | **7.9** | **1.84** | **11 %** |
+| + pendenza max 0.25 + ATR minimo 2.5 | +1398 $ | 7.3 | 1.82 | 12 % |
+
+Cosa dice:
+
+- **Forza del trend**: nel backtest base, le entrate fatte con la EMA50 H1 che si muove più di 0.30 ATR in due candele perdono (−121 $ su 11 trade, 36 % vinte); fra 0.20 e 0.30 rendono poco (+103 $ su 25). Sotto 0.30 ci sono i soldi. Il tetto a 0.30 toglie solo quelle: da +1364 a +1610 $ con 6 operazioni in meno. Soglie più basse tagliano anche le buone (0.10 → +603 $).
+- **ATR minimo da solo non basta** (i pochi trade con ATR 2–2.5 nel test erano perfino in utile), ma **insieme al tetto di pendenza dimezza il drawdown**: 22 % → 11 % perdendo 90 $ di netto. Su un conto da 300 € è lo scambio giusto: il calo massimo passa da −66 a −33 €.
+- Ore server 04, 13, 16 e 22–23 sono in perdita nel test base, ma con 5–10 trade per fascia non vale la pena di un filtro orario: ci pensa la memoria quando avrà i dati.
+
+Modifiche:
+
+- `InpTrendMaxSlope` (0.30): in `TrendDir` la pendenza `(EMA[1] − EMA[3]) / ATR14` del timeframe di trend oltre la soglia rende il trend «troppo forte» e blocca ogni ingresso (`segnale BRK sell ma trend H1 troppo forte (pendenza EMA50 0.41 ATR > 0.30)`). La pendenza compare nello stato (`trend H1: SU (pendenza 0.12 ATR)`) e nel log di ogni ingresso.
+- `InpMinAtr` (2.5, in prezzo): in `OpenPosition`, con l'ATR della strategia sotto la soglia niente ingresso (`segnale BRK buy ma ATR 2.17 < minimo 2.50: troppo poco movimento`).
+- `InpTrendInvert` ora è davvero `true` di default (la v7.50 lo diceva nel README ma il codice aveva `false`).
+
+Sul conto reale da 300 € i limiti in euro sono riproporzionati: tetto 18 €, max perdita giornaliera 75 €, target giornaliero 150 €; il rischio resta il 4 % (13 € a trade).
+
 ## Come testarla (Strategy Tester)
 
 1. Copiare `ScalperBot.mq5` in `MQL5/Experts/`, aprirlo in MetaEditor, **Compile** (F7).
