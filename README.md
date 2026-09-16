@@ -159,7 +159,7 @@ Modifiche:
 - `InpMinAtr` (2.5, in prezzo): in `OpenPosition`, con l'ATR della strategia sotto la soglia niente ingresso (`segnale BRK buy ma ATR 2.17 < minimo 2.50: troppo poco movimento`).
 - `InpTrendInvert` ora è davvero `true` di default (la v7.50 lo diceva nel README ma il codice aveva `false`).
 
-Sul conto reale da 300 € i limiti in euro sono riproporzionati: tetto 18 €, max perdita giornaliera 75 €, target giornaliero 150 €; il rischio resta il 4 % (13 € a trade).
+**v7.61 — i default sono la configurazione del conto reale.** Dal `git pull` non c'è nulla da impostare: rischio 4 %, 3 posizioni, tetto 18 €, max perdita giornaliera 75 €, target giornaliero 150 € (per un conto da 300 €: 6 / 25 / 50 %), fascia oraria 1–23 server (salta la pausa dell'oro e l'ora 23, la peggiore del test), PB su M5 (prima il default era M15, i backtest sono tutti su M5). Su un conto diverso riproporzionare solo i tre limiti in euro.
 
 ## Come testarla (Strategy Tester)
 

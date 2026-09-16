@@ -3,8 +3,8 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.60"
-#define BOT_VERSION "7.60"
+#property version   "7.61"
+#define BOT_VERSION "7.61"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -65,10 +65,10 @@ enum ENUM_BOX_MODE
 // --- PARAMETRI DI INPUT
 input group "--- Generali ---"
 input ENUM_LOT_MODE InpLotMode   = LOT_RISK_PCT; // Come si calcola il lotto
-input double   InpRiskPct        = 2.0;      // Rischio per trade in % del capitale (modo LOT_RISK_PCT)
+input double   InpRiskPct        = 4.0;      // Rischio per trade in % del capitale (modo LOT_RISK_PCT)
 input double   InpLotSize        = 0.25;     // Lotto fisso (modi LOT_FIT_RISK / LOT_FIXED_SKIP) e lotto massimo in LOT_RISK_PCT
 input ulong    InpMagicBase      = 998870;   // Magic number base (ogni strategia usa base+indice)
-input int      InpMaxPositions   = 2;        // Posizioni aperte massime (tutte le strategie)
+input int      InpMaxPositions   = 3;        // Posizioni aperte massime (tutte le strategie)
 input double   InpMaxSpreadPctR  = 25.0;     // Spread massimo in % dello Stop Loss (R) della strategia
 input int      InpMaxSpread      = 0;        // Spread massimo assoluto (Punti), 0 = off (vale solo quello in % di R)
 input int      InpSlippage       = 20;       // Slippage minimo (Punti): si usa il maggiore tra questo e il 10% di R
@@ -76,7 +76,7 @@ input int      InpStatusEveryMin = 5;        // Ogni quanti minuti scrivere lo s
 
 input group "--- Rischio ---"
 input ENUM_SL_MODE InpSlMode     = SL_ATR;   // Come si calcola lo Stop Loss
-input double   InpMaxLossMoney   = 60.0;     // Perdita massima per posizione (€): tetto o SL fisso
+input double   InpMaxLossMoney   = 18.0;     // Perdita massima per posizione (€): tetto o SL fisso (6% del conto da 300€)
 input double   InpBeR            = 0.5;      // A +X R porta lo SL a Break-Even
 input int      InpBeBufferPoints = 5;        // Buffer minimo oltre l'apertura per il Break-Even (le commissioni reali si aggiungono da sole)
 input double   InpTp1R           = 1.0;      // A +X R chiude lo scalp (parziale se runner, totale altrimenti)
@@ -88,13 +88,13 @@ input double   InpTrailStepPctR  = 10.0;     // Trailing: sposta lo SL solo se m
 input bool     InpCommissionPerSide = true;  // Commissione addebitata sia in entrata che in uscita
 
 input group "--- Protezioni giornaliere ---"
-input double   InpMaxDailyLoss   = 150.0;    // Perdita massima giornaliera (€), 0 = off
-input double   InpDailyTarget    = 0.0;      // Obiettivo giornaliero (€): raggiunto, niente nuovi ingressi; 0 = off
+input double   InpMaxDailyLoss   = 75.0;     // Perdita massima giornaliera (€), 0 = off (25% del conto da 300€)
+input double   InpDailyTarget    = 150.0;    // Obiettivo giornaliero (€): raggiunto, niente nuovi ingressi; 0 = off
 input int      InpMaxConsecLosses = 3;       // Perdite consecutive prima della pausa, 0 = off
 input int      InpPauseMinutes   = 60;       // Durata pausa dopo le perdite consecutive
 input int      InpMinSecBetweenTrades = 30;  // Attesa minima tra due ingressi (secondi)
-input int      InpStartHour      = 0;        // Ora server inizio operatività (0-23)
-input int      InpEndHour        = 24;       // Ora server fine operatività (1-24); 0-24 = sempre
+input int      InpStartHour      = 1;        // Ora server inizio operatività (0-23)
+input int      InpEndHour        = 23;       // Ora server fine operatività (1-24); 0-24 = sempre. 1-23: salta la pausa dell'oro e l'ora peggiore del test
 
 input group "--- Filtri di regime (ADX) ---"
 input int      InpAdxPeriod      = 14;
@@ -152,7 +152,7 @@ input bool     InpBrkRunner      = true;
 
 input group "--- 3. PB: pullback EMA in trend ---"
 input bool     InpPbEnabled      = true;
-input ENUM_TIMEFRAMES InpPbTf    = PERIOD_M15;
+input ENUM_TIMEFRAMES InpPbTf    = PERIOD_M5;
 input int      InpPbEmaFast      = 20;
 input int      InpPbEmaSlow      = 50;
 input double   InpPbTouchAtr     = 0.15;     // La candela deve arrivare a X ATR dalla EMA veloce
