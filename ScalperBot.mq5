@@ -3,8 +3,8 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.50"
-#define BOT_VERSION "7.50"
+#property version   "7.60"
+#define BOT_VERSION "7.60"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -107,7 +107,9 @@ input bool            InpTrendFilter    = true;       // Opera solo nel verso de
 input ENUM_TIMEFRAMES InpTrendTf        = PERIOD_H1;  // Timeframe del trend
 input int             InpTrendEma       = 50;         // Periodo della EMA di trend
 input bool            InpTrendNeedSlope = true;       // Serve anche la EMA inclinata nel verso (no = basta prezzo sopra/sotto)
-input bool            InpTrendInvert    = false;      // Controtrend: opera solo CONTRO il verso del timeframe alto
+input bool            InpTrendInvert    = true;       // Controtrend: opera solo CONTRO il verso del timeframe alto
+input double          InpTrendMaxSlope  = 0.30;       // Pendenza massima della EMA (in ATR del suo timeframe, 0 = off): niente ingressi se il trend e' troppo forte
+input double          InpMinAtr         = 2.5;        // ATR minimo della strategia per entrare (in prezzo, 0 = off): evita gli stop da rumore
 
 input group "--- Memoria: impara dagli errori ---"
 input bool     InpLearnEnabled   = true;   // Blocca le combinazioni strategia/verso/fascia oraria in perdita
@@ -194,7 +196,9 @@ string   g_globalWhy   = "";     // perché gli ingressi sono bloccati per tutte
 datetime g_lastStatusLog = 0;
 
 // Filtro di direzione
-int      g_hTrend = INVALID_HANDLE;
+int      g_hTrend    = INVALID_HANDLE;
+int      g_hTrendAtr = INVALID_HANDLE;
+double   g_trendSlope = 0.0;   // pendenza EMA (e1-e3) in ATR del timeframe di trend, aggiornata da TrendDir
 
 // Memoria: risultati per strategia / verso (0 buy, 1 sell) / fascia oraria
 #define LEARN_MAX_BLOCKS 24
@@ -267,6 +271,8 @@ int OnInit()
      {
       g_hTrend = iMA(_Symbol, InpTrendTf, InpTrendEma, 0, MODE_EMA, PRICE_CLOSE);
       if(g_hTrend == INVALID_HANDLE) { Print("ERRORE: EMA di trend non creata"); return(INIT_FAILED); }
+      g_hTrendAtr = iATR(_Symbol, InpTrendTf, 14);   // serve anche solo per mostrare la pendenza nello stato
+      if(g_hTrendAtr == INVALID_HANDLE) { Print("ERRORE: ATR di trend non creato"); return(INIT_FAILED); }
      }
    if(InpLearnEnabled && (InpLearnHourBlock < 1 || InpLearnHourBlock > 24 || InpLearnDays < 1 || InpLearnMinTrades < 1))
      {
@@ -290,7 +296,9 @@ int OnInit()
                lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), InpMaxLossMoney, lotMode);
    if(InpMaxSpread > 0 && spread > InpMaxSpread)
       PrintFormat("ATTENZIONE: spread %d pt > InpMaxSpread %d: nessun ingresso finché non scende", (int)spread, InpMaxSpread);
-   if(InpTrendFilter) PrintFormat("Filtro di direzione: EMA%d %s%s%s", InpTrendEma, TfName(InpTrendTf), InpTrendNeedSlope ? " con pendenza" : "", InpTrendInvert ? " (CONTROTREND)" : "");
+   if(InpTrendFilter) PrintFormat("Filtro di direzione: EMA%d %s%s%s%s", InpTrendEma, TfName(InpTrendTf), InpTrendNeedSlope ? " con pendenza" : "", InpTrendInvert ? " (CONTROTREND)" : "",
+                                  (InpTrendMaxSlope > 0.0) ? StringFormat(", fermo se la pendenza supera %.2f ATR", InpTrendMaxSlope) : "");
+   if(InpMinAtr > 0.0) PrintFormat("ATR minimo per entrare: %s", DoubleToString(InpMinAtr, _Digits));
    if(InpLearnEnabled) PrintFormat("Memoria: ultimi %d giorni, fasce di %d ore, blocco sotto %.1fR con almeno %d trade", InpLearnDays, InpLearnHourBlock, InpLearnBlockR, InpLearnMinTrades);
    return(INIT_SUCCEEDED);
   }
@@ -306,6 +314,7 @@ void OnDeinit(const int reason)
       if(S[i].hEmaSlow != INVALID_HANDLE) IndicatorRelease(S[i].hEmaSlow);
      }
    if(g_hTrend != INVALID_HANDLE) IndicatorRelease(g_hTrend);
+   if(g_hTrendAtr != INVALID_HANDLE) IndicatorRelease(g_hTrendAtr);
   }
 
 //+------------------------------------------------------------------+
@@ -562,6 +571,18 @@ int TrendDir(string &why)
    if(e1 == EMPTY_VALUE || e3 == EMPTY_VALUE || c1 <= 0.0) { why = "EMA di trend non pronta"; return(0); }
    bool up = (c1 > e1) && (!InpTrendNeedSlope || e1 > e3);
    bool dn = (c1 < e1) && (!InpTrendNeedSlope || e1 < e3);
+   // Forza del trend: quanto si e' mossa la EMA in due candele, in ATR del suo timeframe.
+   // Oltre la soglia il trend e' troppo forte per andargli contro (e troppo maturo per inseguirlo).
+   if(g_hTrendAtr != INVALID_HANDLE)
+     {
+      double atrTf = Ind(g_hTrendAtr, 0, 1);
+      g_trendSlope = (atrTf != EMPTY_VALUE && atrTf > 0.0) ? (e1 - e3) / atrTf : 0.0;
+      if(InpTrendMaxSlope > 0.0 && MathAbs(g_trendSlope) > InpTrendMaxSlope && (up || dn))
+        {
+         why = StringFormat("trend %s troppo forte (pendenza EMA%d %.2f ATR > %.2f)", TfName(InpTrendTf), InpTrendEma, MathAbs(g_trendSlope), InpTrendMaxSlope);
+         return(0);
+        }
+     }
    if(up) return(1);
    if(dn) return(-1);
    why = StringFormat("%s neutro (prezzo %s EMA%d, EMA %s)", TfName(InpTrendTf), (c1 > e1) ? "sopra" : "sotto", InpTrendEma, (e1 > e3) ? "sale" : "scende");
@@ -725,6 +746,15 @@ string LearnSummary()
 //+------------------------------------------------------------------+
 bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, double tpPrice, string comment)
   {
+   if(InpMinAtr > 0.0)
+     {
+      double atrNow = Ind(S[idx].hAtr, 0, 1);
+      if(atrNow != EMPTY_VALUE && atrNow < InpMinAtr)
+        {
+         g_why[idx] = StringFormat("segnale %s ma ATR %s < minimo %s: troppo poco movimento", comment, DoubleToString(atrNow, _Digits), DoubleToString(InpMinAtr, _Digits));
+         return(false);
+        }
+     }
    if(InpTrendFilter)
      {
       string why;
@@ -825,7 +855,7 @@ bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, dou
       lastTradeTime = TimeCurrent();
       S[idx].lastEntryBar = iTime(_Symbol, S[idx].tf, 0);
       g_why[idx] = "in posizione";
-      PrintFormat("  %s %.2f lotti, rischio %.2f€ (R=%s), spread %.0f%% di R, TP %s", S[idx].tag, lots, riskMoney, DoubleToString(slDist, _Digits), spreadPct, DoubleToString(tp, _Digits));
+      PrintFormat("  %s %.2f lotti, rischio %.2f€ (R=%s), spread %.0f%% di R, TP %s, pendenza trend %.2f ATR", S[idx].tag, lots, riskMoney, DoubleToString(slDist, _Digits), spreadPct, DoubleToString(tp, _Digits), g_trendSlope);
      }
    else
       g_why[idx] = "ordine rifiutato: " + trade.ResultRetcodeDescription();
@@ -1247,7 +1277,8 @@ void ReportStatus(int total, int &perStrategy[])
    if(InpTrendFilter)
      {
       string why; int dir = TrendDir(why);
-      lines[N_STRATEGIES + 2] += " | trend " + TfName(InpTrendTf) + ": " + ((dir > 0) ? "SU" : (dir < 0) ? "GIU'" : "neutro");
+      lines[N_STRATEGIES + 2] += " | trend " + TfName(InpTrendTf) + ": " + ((dir > 0) ? "SU" : (dir < 0) ? "GIU'" : "neutro")
+                                 + ((g_hTrendAtr != INVALID_HANDLE) ? StringFormat(" (pendenza %.2f ATR)", g_trendSlope) : "");
      }
    string all = "";
    for(int i = 0; i < N_STRATEGIES + 3; i++) all += lines[i] + "\n";
