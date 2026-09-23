@@ -161,6 +161,41 @@ Modifiche:
 
 **v7.61 — i default sono la configurazione del conto reale.** Dal `git pull` non c'è nulla da impostare: rischio 4 %, 3 posizioni, tetto 18 €, max perdita giornaliera 75 €, target giornaliero 150 € (per un conto da 300 €: 6 / 25 / 50 %), fascia oraria 1–23 server (salta la pausa dell'oro e l'ora 23, la peggiore del test), PB su M5 (prima il default era M15, i backtest sono tutti su M5). Su un conto diverso riproporzionare solo i tre limiti in euro.
 
+## v7.70 — le protezioni seguono il conto, e niente trade di notte
+
+Revisione fatta dopo la prima settimana sul conto reale (16–22 settembre): 17 posizioni del bot, 6 vinte, **−66,42 €**. Prima di cambiare qualcosa il backtest è stato rifatto **sulla stessa identica settimana**: ha perso la stessa cifra (−10,7 % contro il −8 % del vivo). Nessun difetto di esecuzione: il bot ha fatto quello che doveva, era la settimana a essere sbagliata. Da lì sono partiti i controlli, uno per volta.
+
+**Cose che sembravano la soluzione e non lo erano** (misurate, scartate): spostare il Break-Even più avanti (`InpBeR` 0.5 → 0.9) peggiora, +453 → +401 $; stringere la pendenza massima (0.30 → 0.20) peggiora, +385 $; pausa più dura dopo le perdite (2 perdite / 180 min) peggiora, +315 $; spegnere BRK costa metà del profitto (+453 → +268 $) anche se è la strategia che ha perso di più sul vivo.
+
+**Cose che erano davvero rotte:**
+
+- **Le protezioni erano importi fissi tarati su un conto che non esisteva più.** Con 157 € sul conto, il limite di perdita giornaliera di 75 € era il 48 % del capitale: non è mai entrato in funzione, in nessuna delle giornate perse. Ora `InpMaxLossPct` (6 %), `InpMaxDailyLossPct` (8 %) e `InpDailyTargetPct` (12 %) sono percentuali del saldo di inizio giornata e vale sempre la più stringente fra percentuale e importo in euro. Nel test un freno a 3 volte il rischio dà risultati **identici** al non averlo: è assicurazione che non costa nulla.
+- **Uno stop loss che non scatta costava molto più di 1 R.** Il 17 settembre una vendita BRK è finita a −18,16 € con lo stop a −10 €: era il vecchio tetto software da 18 € a fare da rete, cioè quasi il triplo del rischio previsto. Con `InpMaxLossRMult` (1.3) la chiusura d'emergenza è legata al rischio di quella posizione, non a un numero fisso.
+- **La memoria non ha mai bloccato niente.** In 230 trade di backtest, zero blocchi: le caselle (strategia × verso × fascia di 3 ore = 64) sono troppo strette perché una sola raccolga gli 8 trade necessari. `InpLearnHourBlock` passa da 3 a 24 (niente divisione per ora) e `InpLearnMinTrades` da 8 a 6: ora blocca davvero, e il fattore di profitto sale da 1,66 a 1,69 con 12 trade in meno.
+- **Le ore di notte perdevano e basta.** Ore server 01–03 (00–02 italiane): −51 $ su 13 trade nel backtest, −27 € su 5 trade sul conto vero. Stop presi sul rumore, con il mercato fermo. `InpStartHour` passa da 1 a 4 e `InpEndHour` da 23 a 22: si opera **dalle 03:00 alle 21:00 italiane**.
+
+Backtest 10 agosto – 22 settembre, tick reali, conto da 170 $ (quello vero):
+
+| configurazione | netto | fattore di profitto | calo massimo | trade | vinte |
+|---|---|---|---|---|---|
+| v7.61 (com'era) | +115 $ | 1.51 | 14.1 % | 129 | 50 % |
+| + solo niente notte | +174 $ | 1.87 | 12.5 % | 126 | 56 % |
+| **v7.70 (03–21 italiane)** | **+173 $** | **1.93** | **12.5 %** | 115 | 55 % |
+
+E sulla settimana che aveva perso davvero (15–22 settembre, conto da 300 $): da **−32 $ con calo del 15,4 %** a **−2 $ con calo del 10,1 %**.
+
+Il rischio per trade scende da 4 % a 3 % (`InpRiskPct`): su un conto da 157 € il 4 % significa che quattro stop di fila valgono il 16 % del capitale, come è successo il 16 settembre.
+
+**Controllo fuori campione**, cioè su periodi mai usati per scegliere nessuno di questi valori. Su tutto lo storico disponibile, conto da 170 $:
+
+| periodo | v7.61 | v7.70 |
+|---|---|---|
+| 1 luglio – 9 agosto (solo luglio) | −36 $, calo 37,6 % | −35 $, calo 29,0 % |
+| 1 luglio – 22 settembre | +59 $, PF 1.12, calo 37,6 % | **+142 $, PF 1.56, calo 29,0 %** |
+| giugno | — | +17 $, PF 1.38, calo 14,1 % |
+
+Su quasi quattro mesi la versione nuova rende più del doppio con un calo massimo di un quarto più basso. Ma **luglio perde in tutte e due le versioni**: le modifiche riducono il danno (metà dei trade, giornata peggiore −6,7 % invece di −20 %), non trasformano un periodo perdente in uno vincente. Luglio sono stati venticinque giorni di piccole perdite continue. Il vantaggio di questa strategia dipende dal periodo, e un calo del 29 % resta possibile: va trattato come tale nel dimensionare il conto.
+
 ## Come testarla (Strategy Tester)
 
 1. Copiare `ScalperBot.mq5` in `MQL5/Experts/`, aprirlo in MetaEditor, **Compile** (F7).
