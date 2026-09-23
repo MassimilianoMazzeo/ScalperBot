@@ -3,8 +3,8 @@
 //|                                   Copyright 2026, Mazzeo/Tavelli |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "7.61"
-#define BOT_VERSION "7.61"
+#property version   "7.70"
+#define BOT_VERSION "7.70"
 
 #include <Trade\Trade.mqh>
 CTrade trade;
@@ -65,7 +65,7 @@ enum ENUM_BOX_MODE
 // --- PARAMETRI DI INPUT
 input group "--- Generali ---"
 input ENUM_LOT_MODE InpLotMode   = LOT_RISK_PCT; // Come si calcola il lotto
-input double   InpRiskPct        = 4.0;      // Rischio per trade in % del capitale (modo LOT_RISK_PCT)
+input double   InpRiskPct        = 3.0;      // Rischio per trade in % del capitale (modo LOT_RISK_PCT)
 input double   InpLotSize        = 0.25;     // Lotto fisso (modi LOT_FIT_RISK / LOT_FIXED_SKIP) e lotto massimo in LOT_RISK_PCT
 input ulong    InpMagicBase      = 998870;   // Magic number base (ogni strategia usa base+indice)
 input int      InpMaxPositions   = 3;        // Posizioni aperte massime (tutte le strategie)
@@ -76,7 +76,9 @@ input int      InpStatusEveryMin = 5;        // Ogni quanti minuti scrivere lo s
 
 input group "--- Rischio ---"
 input ENUM_SL_MODE InpSlMode     = SL_ATR;   // Come si calcola lo Stop Loss
-input double   InpMaxLossMoney   = 18.0;     // Perdita massima per posizione (€): tetto o SL fisso (6% del conto da 300€)
+input double   InpMaxLossMoney   = 18.0;     // Perdita massima per posizione (€): tetto o SL fisso. 0 = solo la % qui sotto
+input double   InpMaxLossPct     = 6.0;      // Perdita massima per posizione in % del capitale (0 = off): vale il piu' basso tra questa e il tetto in euro
+input double   InpMaxLossRMult   = 1.3;      // Chiusura d'emergenza a X volte il rischio previsto (0 = off): lo SL che non scatta non costa piu' di cosi'
 input double   InpBeR            = 0.5;      // A +X R porta lo SL a Break-Even
 input int      InpBeBufferPoints = 5;        // Buffer minimo oltre l'apertura per il Break-Even (le commissioni reali si aggiungono da sole)
 input double   InpTp1R           = 1.0;      // A +X R chiude lo scalp (parziale se runner, totale altrimenti)
@@ -88,13 +90,15 @@ input double   InpTrailStepPctR  = 10.0;     // Trailing: sposta lo SL solo se m
 input bool     InpCommissionPerSide = true;  // Commissione addebitata sia in entrata che in uscita
 
 input group "--- Protezioni giornaliere ---"
-input double   InpMaxDailyLoss   = 75.0;     // Perdita massima giornaliera (€), 0 = off (25% del conto da 300€)
+input double   InpMaxDailyLoss   = 75.0;     // Perdita massima giornaliera (€), 0 = off
+input double   InpMaxDailyLossPct = 8.0;     // Perdita massima giornaliera in % del saldo di inizio giornata (0 = off): vale la piu' bassa tra le due
 input double   InpDailyTarget    = 150.0;    // Obiettivo giornaliero (€): raggiunto, niente nuovi ingressi; 0 = off
+input double   InpDailyTargetPct = 12.0;     // Obiettivo giornaliero in % del saldo di inizio giornata (0 = off): vale il piu' basso tra i due
 input int      InpMaxConsecLosses = 3;       // Perdite consecutive prima della pausa, 0 = off
 input int      InpPauseMinutes   = 60;       // Durata pausa dopo le perdite consecutive
 input int      InpMinSecBetweenTrades = 30;  // Attesa minima tra due ingressi (secondi)
-input int      InpStartHour      = 1;        // Ora server inizio operatività (0-23)
-input int      InpEndHour        = 23;       // Ora server fine operatività (1-24); 0-24 = sempre. 1-23: salta la pausa dell'oro e l'ora peggiore del test
+input int      InpStartHour      = 4;        // Ora server inizio operatività (0-23): 4 = niente ingressi di notte (00-03 italiane)
+input int      InpEndHour        = 22;       // Ora server fine operatività (1-24); 0-24 = sempre. 4-22 = 03:00-21:00 italiane
 
 input group "--- Filtri di regime (ADX) ---"
 input int      InpAdxPeriod      = 14;
@@ -114,9 +118,9 @@ input double          InpMinAtr         = 2.5;        // ATR minimo della strate
 input group "--- Memoria: impara dagli errori ---"
 input bool     InpLearnEnabled   = true;   // Blocca le combinazioni strategia/verso/fascia oraria in perdita
 input int      InpLearnDays      = 10;     // Giorni di storico considerati (finestra scorrevole)
-input int      InpLearnMinTrades = 8;      // Trade minimi nella combinazione prima di giudicarla
+input int      InpLearnMinTrades = 6;      // Trade minimi nella combinazione prima di giudicarla
 input double   InpLearnBlockR    = -3.0;   // Blocco se la somma dei risultati in R e' sotto questa soglia
-input int      InpLearnHourBlock = 3;      // Ampiezza della fascia oraria (ore server)
+input int      InpLearnHourBlock = 24;     // Ampiezza della fascia oraria (ore server); 24 = nessuna divisione per ora
 
 input group "--- 0. RNG: range mean-reversion ---"
 input bool     InpRngEnabled     = false;
@@ -213,6 +217,10 @@ datetime g_memBuilt  = 0;
 int      g_prevTotal = 0;
 int      g_memBlocked = 0;
 
+// Saldo di inizio giornata: base delle protezioni in percentuale
+datetime g_dayKey = 0;
+double   g_dayStartBalance = 0.0;
+
 //+------------------------------------------------------------------+
 //| Init                                                             |
 //+------------------------------------------------------------------+
@@ -292,8 +300,11 @@ int OnInit()
                (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL), (int)spread);
    string lotMode = (InpLotMode == LOT_RISK_PCT) ? StringFormat("calcolato: %.1f%% di %.0f€ = %.0f€ a trade (max %.2f lotti)", InpRiskPct, AccountInfoDouble(ACCOUNT_EQUITY), AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0, InpLotSize)
                     : (InpLotMode == LOT_FIT_RISK) ? "fisso, ridotto se il rischio supera il tetto" : "fisso, salta se il rischio supera il tetto";
-   PrintFormat("Lotto max %.2f: 1 punto = %.4f€, spread ora = %.2f€ | tetto %.0f€ | lotto %s",
-               lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), InpMaxLossMoney, lotMode);
+   PrintFormat("Lotto max %.2f: 1 punto = %.4f€, spread ora = %.2f€ | tetto per posizione %.2f€ | lotto %s",
+               lots, PriceToMoney(_Point, lots), PriceToMoney(spread * _Point, lots), PositionLossCap(), lotMode);
+   PrintFormat("Protezioni del giorno sul saldo di %.2f€: stop a -%.2f€, obiettivo +%.2f€%s",
+               DayStartBalance(), DailyLossLimit(), DailyTargetLimit(),
+               (InpMaxLossRMult > 0.0) ? StringFormat(", chiusura d'emergenza a %.1f volte il rischio", InpMaxLossRMult) : "");
    if(InpMaxSpread > 0 && spread > InpMaxSpread)
       PrintFormat("ATTENZIONE: spread %d pt > InpMaxSpread %d: nessun ingresso finché non scende", (int)spread, InpMaxSpread);
    if(InpTrendFilter) PrintFormat("Filtro di direzione: EMA%d %s%s%s%s", InpTrendEma, TfName(InpTrendTf), InpTrendNeedSlope ? " con pendenza" : "", InpTrendInvert ? " (CONTROTREND)" : "",
@@ -460,6 +471,38 @@ void TodayStats(double &realized, int &consecLosses, datetime &lastLossTime)
      }
   }
 
+//+------------------------------------------------------------------+
+//| Saldo con cui e' cominciata la giornata: i limiti giornalieri e   |
+//| il tetto per posizione sono percentuali di questo, non importi    |
+//| fissi che restano tarati su un conto che non c'e' piu'.           |
+//+------------------------------------------------------------------+
+double DayStartBalance()
+  {
+   datetime now = TimeCurrent();
+   datetime key = now - (now % 86400);
+   if(key != g_dayKey || g_dayStartBalance <= 0.0)
+     {
+      double realized; int consec; datetime lastLoss;
+      TodayStats(realized, consec, lastLoss);
+      g_dayKey = key;
+      g_dayStartBalance = MathMax(1.0, AccountInfoDouble(ACCOUNT_BALANCE) - realized);
+     }
+   return(g_dayStartBalance);
+  }
+
+// Il piu' stringente tra l'importo in euro e la percentuale (0 = quella voce non vale)
+double TighterLimit(double money, double pct, double base)
+  {
+   double byPct = (pct > 0.0) ? base * pct / 100.0 : 0.0;
+   if(money <= 0.0) return(byPct);
+   if(byPct   <= 0.0) return(money);
+   return(MathMin(money, byPct));
+  }
+
+double DailyLossLimit()   { return(TighterLimit(InpMaxDailyLoss, InpMaxDailyLossPct, DayStartBalance())); }
+double DailyTargetLimit() { return(TighterLimit(InpDailyTarget,  InpDailyTargetPct,  DayStartBalance())); }
+double PositionLossCap()  { return(TighterLimit(InpMaxLossMoney, InpMaxLossPct, AccountInfoDouble(ACCOUNT_EQUITY))); }
+
 double FloatingNetPnL()
   {
    double sum = 0.0;
@@ -499,7 +542,8 @@ bool GlobalEntryFiltersOk()
       if(!inside) { g_globalWhy = StringFormat("fuori fascia oraria %02d-%02d (ora server %02d)", InpStartHour, InpEndHour, t.hour); return(false); }
      }
 
-   if(InpMaxDailyLoss > 0.0 || InpMaxConsecLosses > 0 || InpDailyTarget > 0.0)
+   double dayLossLimit = DailyLossLimit(), dayTarget = DailyTargetLimit();
+   if(dayLossLimit > 0.0 || InpMaxConsecLosses > 0 || dayTarget > 0.0)
      {
       double realized; int consec; datetime lastLoss;
       TodayStats(realized, consec, lastLoss);
@@ -519,28 +563,28 @@ bool GlobalEntryFiltersOk()
            }
         }
       double dailyPnL = realized + FloatingNetPnL();
-      if(InpDailyTarget > 0.0 && dailyPnL >= InpDailyTarget)
+      if(dayTarget > 0.0 && dailyPnL >= dayTarget)
         {
          static datetime lastTargetLog = 0;
          if(now - lastTargetLog > 600)
            {
-            PrintFormat("OBIETTIVO GIORNALIERO raggiunto: %+.2f€ (target %.0f€). Nessun nuovo ingresso oggi.", dailyPnL, InpDailyTarget);
+            PrintFormat("OBIETTIVO GIORNALIERO raggiunto: %+.2f€ (target %.2f€ = saldo di stamattina %.2f€). Nessun nuovo ingresso oggi.", dailyPnL, dayTarget, DayStartBalance());
             lastTargetLog = now;
            }
-         g_globalWhy = StringFormat("obiettivo raggiunto: oggi %+.2f€ (target %.0f€)", dailyPnL, InpDailyTarget);
+         g_globalWhy = StringFormat("obiettivo raggiunto: oggi %+.2f€ (target %.0f€)", dailyPnL, dayTarget);
          return(false);
         }
-      if(InpMaxDailyLoss > 0.0)
+      if(dayLossLimit > 0.0)
         {
-         if(dailyPnL <= -MathAbs(InpMaxDailyLoss))
+         if(dailyPnL <= -MathAbs(dayLossLimit))
            {
             static datetime lastWarn = 0;
             if(now - lastWarn > 600)
               {
-               PrintFormat("LIMITE GIORNALIERO: %.2f€ (limite -%.2f€). Nessun nuovo ingresso oggi.", dailyPnL, InpMaxDailyLoss);
+               PrintFormat("LIMITE GIORNALIERO: %.2f€ (limite -%.2f€ = saldo di stamattina %.2f€). Nessun nuovo ingresso oggi.", dailyPnL, dayLossLimit, DayStartBalance());
                lastWarn = now;
               }
-            g_globalWhy = StringFormat("limite giornaliero: oggi %.2f€ (limite -%.0f€)", dailyPnL, InpMaxDailyLoss);
+            g_globalWhy = StringFormat("limite giornaliero: oggi %.2f€ (limite -%.0f€)", dailyPnL, dayLossLimit);
             return(false);
            }
         }
@@ -784,42 +828,44 @@ bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, dou
       return(false);
      }
 
-   // Lotto dal rischio: X% del capitale, entro il tetto in euro e il lotto massimo
+   // Lotto dal rischio: X% del capitale, entro il tetto per posizione e il lotto massimo
    double riskPerLot = PriceToMoney(slDist, 1.0);
+   double lossCap    = PositionLossCap();
    if(InpLotMode == LOT_RISK_PCT)
      {
       if(riskPerLot <= 0.0) { g_why[idx] = "tick value non disponibile"; return(false); }
-      double budget = MathMin(AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0, InpMaxLossMoney);
+      double budget = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0;
+      if(lossCap > 0.0) budget = MathMin(budget, lossCap);
       double wanted = budget / riskPerLot;
       double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
       if(wanted < minLot)
         {
-         g_why[idx] = StringFormat("rischio %.0f€ al lotto minimo > budget %.0f€", riskPerLot * minLot, budget);
+         g_why[idx] = StringFormat("rischio %.2f€ al lotto minimo > budget %.2f€", riskPerLot * minLot, budget);
          return(false);
         }
       lots = NormalizeLot(MathMin(wanted, InpLotSize));
      }
    double riskMoney = riskPerLot * lots;
 
-   // Tetto di perdita in euro: riduci il lotto oppure salta
-   if(riskMoney > InpMaxLossMoney + 0.01)
+   // Tetto di perdita per posizione: riduci il lotto oppure salta
+   if(lossCap > 0.0 && riskMoney > lossCap + 0.01)
      {
       if(InpLotMode != LOT_FIXED_SKIP && riskPerLot > 0.0)
         {
-         double fitted = NormalizeLot(InpMaxLossMoney / riskPerLot);
-         if(riskPerLot * fitted > InpMaxLossMoney + 0.01)
+         double fitted = NormalizeLot(lossCap / riskPerLot);
+         if(riskPerLot * fitted > lossCap + 0.01)
            {
-            g_why[idx] = StringFormat("rischio %.0f€ al lotto minimo > tetto %.0f€", riskPerLot * fitted, InpMaxLossMoney);
+            g_why[idx] = StringFormat("rischio %.2f€ al lotto minimo > tetto %.2f€", riskPerLot * fitted, lossCap);
             return(false);
            }
-         PrintFormat("%s: lotto %.2f -> %.2f per restare nel tetto di %.0f€ (R=%s)", S[idx].tag, lots, fitted, InpMaxLossMoney, DoubleToString(slDist, _Digits));
+         PrintFormat("%s: lotto %.2f -> %.2f per restare nel tetto di %.2f€ (R=%s)", S[idx].tag, lots, fitted, lossCap, DoubleToString(slDist, _Digits));
          lots = fitted;
          riskMoney = riskPerLot * lots;
         }
       else
         {
-         g_why[idx] = StringFormat("rischio %.0f€ > tetto %.0f€ (lotto fisso)", riskMoney, InpMaxLossMoney);
-         PrintFormat("SKIP %s: rischio %.2f€ > tetto %.2f€ (SL %s)", S[idx].tag, riskMoney, InpMaxLossMoney, DoubleToString(slDist, _Digits));
+         g_why[idx] = StringFormat("rischio %.2f€ > tetto %.2f€ (lotto fisso)", riskMoney, lossCap);
+         PrintFormat("SKIP %s: rischio %.2f€ > tetto %.2f€ (SL %s)", S[idx].tag, riskMoney, lossCap, DoubleToString(slDist, _Digits));
          return(false);
         }
      }
@@ -926,10 +972,20 @@ void ManagePosition(ulong ticket, int &perStrategy[], int total)
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double net = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) + info.commission;
 
-   // Backup software del tetto di perdita (al broker c'è già lo SL)
-   if(net <= -InpMaxLossMoney)
+   // Backup software del tetto di perdita (al broker c'è già lo SL, ma può non scattare)
+   double cap = PositionLossCap();
+   if(InpMaxLossRMult > 0.0 && info.initialSL > 0.0)
      {
-      if(trade.PositionClose(ticket)) { PrintFormat("CHIUSA %I64u a %.2f€: tetto perdita", ticket, net); lastTradeTime = TimeCurrent(); }
+      double plannedRisk = PriceToMoney(MathAbs(openPrice - info.initialSL), info.initVolume);
+      if(plannedRisk > 0.0)
+        {
+         double byR = plannedRisk * InpMaxLossRMult;
+         cap = (cap > 0.0) ? MathMin(cap, byR) : byR;
+        }
+     }
+   if(cap > 0.0 && net <= -cap)
+     {
+      if(trade.PositionClose(ticket)) { PrintFormat("CHIUSA %I64u a %.2f€: tetto perdita %.2f€", ticket, net, cap); lastTradeTime = TimeCurrent(); }
       else LogTradeResult("Close cap");
       return;
      }
@@ -1243,10 +1299,11 @@ void ReportStatus(int total, int &perStrategy[])
    double realized; int consec; datetime lastLoss;
    TodayStats(realized, consec, lastLoss);
    double todayPnL = realized + FloatingNetPnL();
-   string goal = (InpDailyTarget > 0.0) ? StringFormat(" / target +%.0f€", InpDailyTarget) : "";
+   double dayTarget = DailyTargetLimit();
+   string goal = (dayTarget > 0.0) ? StringFormat(" / target +%.0f€", dayTarget) : "";
    lines[0] = StringFormat("ScalperBot v" + BOT_VERSION + " | %s | spread %d pt = %.2f€ | posizioni %d/%d | oggi %+.2f€%s / max -%.0f€ | %s",
                            _Symbol, (int)spread, PriceToMoney(spread * _Point, lots), total, InpMaxPositions,
-                           todayPnL, goal, InpMaxDailyLoss, TimeToString(now, TIME_DATE | TIME_MINUTES));
+                           todayPnL, goal, DailyLossLimit(), TimeToString(now, TIME_DATE | TIME_MINUTES));
    lines[1] = (g_globalWhy == "") ? "ingressi: aperti" : "INGRESSI BLOCCATI: " + g_globalWhy;
 
    for(int i = 0; i < N_STRATEGIES; i++)
@@ -1261,11 +1318,13 @@ void ReportStatus(int total, int &perStrategy[])
       double perLot = PriceToMoney(R, 1.0);
       if(InpLotMode == LOT_RISK_PCT && perLot > 0.0)
         {
-         double budget = MathMin(AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0, InpMaxLossMoney);
+         double budget = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPct / 100.0;
+         double lossCap = PositionLossCap();
+         if(lossCap > 0.0) budget = MathMin(budget, lossCap);
          double l = NormalizeLot(MathMin(budget / perLot, InpLotSize));
-         cap = StringFormat(" | lotto %.2f = %.0f€", l, perLot * l);
+         cap = StringFormat(" | lotto %.2f = %.2f€", l, perLot * l);
         }
-      else if(eur > InpMaxLossMoney) cap = (InpLotMode == LOT_FIT_RISK) ? StringFormat(" -> lotto %.2f", NormalizeLot(InpMaxLossMoney / perLot)) : " > TETTO";
+      else if(PositionLossCap() > 0.0 && eur > PositionLossCap()) cap = (InpLotMode == LOT_FIT_RISK) ? StringFormat(" -> lotto %.2f", NormalizeLot(PositionLossCap() / perLot)) : " > TETTO";
       string state = (perStrategy[i] > 0) ? "IN POSIZIONE" : g_why[i];
       lines[i + 2] = StringFormat("%s | ATR %s | R %s%s | spread %.0f%% di R | %s",
                                   tag, DoubleToString(atr, _Digits), DoubleToString(R, _Digits),
