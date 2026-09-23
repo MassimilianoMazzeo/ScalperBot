@@ -56,6 +56,13 @@ enum ENUM_LOT_MODE
    LOT_FIXED_SKIP   // Lotto fisso InpLotSize: se il rischio supera il tetto salta l'ingresso
   };
 
+enum ENUM_SIDE
+  {
+   SIDE_BOTH,   // Compra e vendi
+   SIDE_BUY,    // Solo acquisti
+   SIDE_SELL    // Solo vendite
+  };
+
 enum ENUM_BOX_MODE
   {
    BOX_CANDLES,   // Box = ultime N candele chiuse
@@ -68,6 +75,7 @@ input ENUM_LOT_MODE InpLotMode   = LOT_RISK_PCT; // Come si calcola il lotto
 input double   InpRiskPct        = 3.0;      // Rischio per trade in % del capitale (modo LOT_RISK_PCT)
 input double   InpLotSize        = 0.25;     // Lotto fisso (modi LOT_FIT_RISK / LOT_FIXED_SKIP) e lotto massimo in LOT_RISK_PCT
 input ulong    InpMagicBase      = 998870;   // Magic number base (ogni strategia usa base+indice)
+input ENUM_SIDE InpSide          = SIDE_BOTH; // Verso consentito: entrambi, solo acquisti, solo vendite
 input int      InpMaxPositions   = 3;        // Posizioni aperte massime (tutte le strategie)
 input double   InpMaxSpreadPctR  = 25.0;     // Spread massimo in % dello Stop Loss (R) della strategia
 input int      InpMaxSpread      = 0;        // Spread massimo assoluto (Punti), 0 = off (vale solo quello in % di R)
@@ -790,6 +798,12 @@ string LearnSummary()
 //+------------------------------------------------------------------+
 bool OpenPosition(int idx, ENUM_ORDER_TYPE type, double lots, double slDist, double tpPrice, string comment)
   {
+   if((InpSide == SIDE_BUY  && type != ORDER_TYPE_BUY) ||
+      (InpSide == SIDE_SELL && type != ORDER_TYPE_SELL))
+     {
+      g_why[idx] = StringFormat("segnale %s ma il bot opera %s", comment, (InpSide == SIDE_BUY) ? "solo in acquisto" : "solo in vendita");
+      return(false);
+     }
    if(InpMinAtr > 0.0)
      {
       double atrNow = Ind(S[idx].hAtr, 0, 1);
